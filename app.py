@@ -1,8 +1,12 @@
+import os
+import sys
+import json
+from datetime import date
+
 from flask import Flask, request
 from dotenv import load_dotenv
 from flask_sqlalchemy import SQLAlchemy
-import os
-import sys
+from google import genai
 
 
 load_dotenv()
@@ -19,6 +23,25 @@ class User(db.Model):
 
 with app.app_context():
     db.create_all()
+
+
+
+client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+model="gemini-2.0-flash-latest"
+
+def parse_event(message):
+    today = date.today().strftime("%A, %B %d, %Y")
+    prompt = f"""Today is {today}.
+Extract calendar event details from this message and return ONLY a JSON object with these fields:
+title, date (YYYY-MM-DD), time (HH:MM, 24hr), duration_minutes.
+Set any missing fields to null.
+Message: "{message}" """
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
+    raw = response.text.strip().replace("```json", "").replace("```", "")
+    return json.loads(raw)
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
