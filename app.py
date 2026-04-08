@@ -24,10 +24,7 @@ class User(db.Model):
 with app.app_context():
     db.create_all()
 
-
-
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-model="gemini-2.0-flash-latest"
 
 def parse_event(message):
     today = date.today().strftime("%A, %B %d, %Y")
