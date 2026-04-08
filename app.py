@@ -10,6 +10,9 @@ from dotenv import load_dotenv
 from flask_sqlalchemy import SQLAlchemy
 from google import genai
 from requests_oauthlib import OAuth2Session
+from google.oauth2.credentials import Credentials
+from googleapiclient.discovery import build
+from datetime import datetime, timedelta
 
 load_dotenv()
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -39,11 +42,31 @@ title, date (YYYY-MM-DD), time (HH:MM, 24hr), duration_minutes.
 Set any missing fields to null.
 Message: "{message}" """
     response = client.models.generate_content(
-        model="gemini-2.5-flash-preview-04-17",
+        model="gemini-2.5-flash",
         contents=prompt
     )
     raw = response.text.strip().replace("```json", "").replace("```", "")
     return json.loads(raw)
+
+def create_calendar_event(user, event_data):
+    creds = Credentials(
+        token=user.oauth_token,
+        refresh_token=user.refresh_token,
+        token_uri="https://oauth2.googleapis.com/token",
+        client_id=os.getenv("GOOGLE_CLIENT_ID"),
+        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+    )
+    service = build("calendar", "v3", credentials=creds)
+    start = datetime.strptime(
+        f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M"
+    )
+    end = start + timedelta(minutes=event_data["duration_minutes"] or 60)
+    event = {
+        "summary": event_data["title"],
+        "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
+        "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
+    }
+    return service.events().insert(calendarId="primary", body=event).execute()
 
 @app.route("/webhook", methods=["POST"])
 def webhook():
