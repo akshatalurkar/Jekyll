@@ -13,6 +13,7 @@ from requests_oauthlib import OAuth2Session
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from datetime import datetime, timedelta
+from twilio.rest import Client as TwilioClient
 
 load_dotenv()
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -72,7 +73,35 @@ def create_calendar_event(user, event_data):
 def webhook():
     phone = request.form.get("From")
     message = request.form.get("Body")
-    print(f"Message from {phone}: {message}")
+
+    twilio_client = TwilioClient(
+        os.getenv("TWILIO_ACCOUNT_SID"),
+        os.getenv("TWILIO_AUTH_TOKEN")
+    )
+
+    user = User.query.filter_by(phone=phone).first()
+
+    if not user or not user.oauth_token:
+        twilio_client.messages.create(
+            to=phone,
+            from_=os.getenv("TWILIO_PHONE_NUMBER"),
+            body=f"Welcome! Connect your Google Calendar first: http://localhost:8000/auth/{phone}"
+        )
+        return "OK", 200
+
+    try:
+        event_data = parse_event(message)
+        create_calendar_event(user, event_data)
+        confirmation = f"Added: {event_data['title']} on {event_data['date']} at {event_data['time']}"
+    except Exception as e:
+        print(f"Error: {e}")
+        confirmation = "Something went wrong — please try again in a moment."
+
+    twilio_client.messages.create(
+        to=phone,
+        from_=os.getenv("TWILIO_PHONE_NUMBER"),
+        body=confirmation
+    )
     return "OK", 200
 
 @app.route("/auth/<phone>")
