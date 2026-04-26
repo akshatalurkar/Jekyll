@@ -217,60 +217,48 @@ def send_whatsapp(to, text):
     return response.json()
 
 # ── Routes ──────────────────────────────────────────────────
+
 AUTH_PAGE = """<!DOCTYPE html>
 <html lang="en">
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Jekyll — Connect Calendar</title>
-<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:ital,wght@0,400;0,600;1,400&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body {
-    min-height: 100vh;
-    background: #0b0d10;
-    font-family: 'DM Sans', sans-serif;
-    color: #e8e4de;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    padding: 2rem 1.5rem;
-    position: relative;
-    overflow: hidden;
-  }
-  .bg-grid {
-    position: fixed; inset: 0;
-    background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px);
-    background-size: 48px 48px; pointer-events: none;
-  }
-  .bg-glow { position: fixed; width: 500px; height: 500px; border-radius: 50%; background: radial-gradient(circle, rgba(52,168,83,0.07) 0%, transparent 70%); top: -120px; right: -80px; pointer-events: none; }
-  .bg-glow-2 { position: fixed; width: 400px; height: 400px; border-radius: 50%; background: radial-gradient(circle, rgba(66,133,244,0.05) 0%, transparent 70%); bottom: -100px; left: -80px; pointer-events: none; }
-  .card { position: relative; width: 100%; max-width: 420px; background: #12151a; border: 0.5px solid rgba(255,255,255,0.1); border-radius: 20px; padding: 3rem 2.5rem; animation: fadeUp 0.6s cubic-bezier(0.22,1,0.36,1) both; }
+  body { min-height: 100vh; background: #0b0d10; font-family: 'DM Sans', sans-serif; color: #e8e4de; display: flex; align-items: center; justify-content: center; padding: 2rem 1.5rem; position: relative; overflow: hidden; }
+  .bg-grid { position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px); background-size: 48px 48px; pointer-events: none; }
+  .bg-glow { position: fixed; width: 560px; height: 560px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.13) 0%, rgba(37,211,102,0.04) 45%, transparent 70%); top: -150px; right: -100px; pointer-events: none; }
+  .bg-glow-2 { position: fixed; width: 480px; height: 480px; border-radius: 50%; background: radial-gradient(circle, rgba(18,140,65,0.11) 0%, rgba(18,140,65,0.04) 45%, transparent 70%); bottom: -120px; left: -100px; pointer-events: none; }
+  .bg-glow-3 { position: fixed; width: 200px; height: 200px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.07) 0%, transparent 70%); top: 40%; left: 10%; pointer-events: none; }
+  .card { position: relative; width: 100%; max-width: 420px; background: #12151a; border: 0.5px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 3rem 2.5rem; animation: fadeUp 0.6s cubic-bezier(0.22,1,0.36,1) both; }
   @keyframes fadeUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
   .logo-row { display: flex; align-items: center; gap: 10px; margin-bottom: 2.5rem; }
-  .logo-icon { width: 32px; height: 32px; background: #e8e4de; border-radius: 8px; display: flex; align-items: center; justify-content: center; }
-  .logo-name { font-family: 'Playfair Display', serif; font-size: 20px; font-weight: 600; color: #e8e4de; }
-  .heading { font-family: 'Playfair Display', serif; font-size: 28px; font-weight: 400; line-height: 1.3; color: #e8e4de; margin-bottom: 0.75rem; }
-  .heading em { font-style: italic; color: #a8c5a0; }
-  .subtext { font-size: 14px; color: rgba(232,228,222,0.5); line-height: 1.6; margin-bottom: 2rem; }
+  .logo-icon { width: 32px; height: 32px; background: #25D366; border-radius: 8px; display: flex; align-items: center; justify-content: center; }
+  .logo-name { font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 700; letter-spacing: -0.5px; color: #e8e4de; }
+  .heading { font-family: 'Syne', sans-serif; font-size: 30px; font-weight: 600; line-height: 1.25; color: #e8e4de; margin-bottom: 0.75rem; letter-spacing: -0.5px; }
+  .heading em { font-style: normal; color: #25D366; }
+  .subtext { font-size: 14px; color: rgba(232,228,222,0.45); line-height: 1.6; margin-bottom: 2rem; }
   .divider { height: 0.5px; background: rgba(255,255,255,0.07); margin-bottom: 2rem; }
-  .phone-pill { display: inline-flex; align-items: center; gap: 8px; background: rgba(255,255,255,0.05); border: 0.5px solid rgba(255,255,255,0.1); border-radius: 100px; padding: 6px 14px; font-size: 13px; color: rgba(232,228,222,0.6); margin-bottom: 2rem; }
-  .phone-dot { width: 6px; height: 6px; border-radius: 50%; background: #4caf70; animation: pulse 2s ease-in-out infinite; }
-  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.4; } }
+  .phone-pill { display: inline-flex; align-items: center; gap: 8px; background: rgba(37,211,102,0.07); border: 0.5px solid rgba(37,211,102,0.2); border-radius: 100px; padding: 6px 14px; font-size: 13px; color: rgba(232,228,222,0.55); margin-bottom: 2rem; }
+  .phone-dot { width: 6px; height: 6px; border-radius: 50%; background: #25D366; animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
   .connect-btn { display: flex; align-items: center; justify-content: center; gap: 12px; width: 100%; padding: 14px 20px; background: #e8e4de; color: #0b0d10; border: none; border-radius: 12px; font-family: 'DM Sans', sans-serif; font-size: 15px; font-weight: 500; cursor: pointer; text-decoration: none; transition: background 0.2s, transform 0.15s; }
   .connect-btn:hover { background: #ffffff; transform: translateY(-1px); }
   .connect-btn:active { transform: scale(0.99); }
   .steps { margin-top: 2rem; display: flex; flex-direction: column; gap: 12px; }
   .step { display: flex; align-items: flex-start; gap: 12px; }
-  .step-num { width: 22px; height: 22px; border-radius: 50%; border: 0.5px solid rgba(255,255,255,0.15); display: flex; align-items: center; justify-content: center; font-size: 11px; color: rgba(232,228,222,0.4); flex-shrink: 0; margin-top: 1px; }
-  .step-text { font-size: 13px; color: rgba(232,228,222,0.45); line-height: 1.5; }
-  .footer { margin-top: 2.5rem; font-size: 11px; color: rgba(232,228,222,0.2); text-align: center; line-height: 1.6; }
+  .step-num { width: 22px; height: 22px; border-radius: 50%; border: 0.5px solid rgba(37,211,102,0.2); display: flex; align-items: center; justify-content: center; font-size: 11px; color: rgba(37,211,102,0.45); flex-shrink: 0; margin-top: 1px; font-family: 'Syne', sans-serif; }
+  .step-text { font-size: 13px; color: rgba(232,228,222,0.4); line-height: 1.5; }
+  .footer { margin-top: 2.5rem; font-size: 11px; color: rgba(232,228,222,0.18); text-align: center; line-height: 1.6; }
 </style>
 </head>
 <body>
   <div class="bg-grid"></div>
   <div class="bg-glow"></div>
   <div class="bg-glow-2"></div>
+  <div class="bg-glow-3"></div>
   <div class="card">
     <div class="logo-row">
       <div class="logo-icon">
