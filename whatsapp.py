@@ -52,24 +52,22 @@ CREATE - adding any new event, appointment, reminder, or block
 RECURRING - adding a repeating or regular event (contains: "every", "weekly", "daily", "each", "every week")
 DELETE - canceling, removing, or deleting an existing event
 LIST - asking what's on the calendar, what's coming up, any upcoming events
+CONFIRM - user is confirming a previous action with "yes", "yep", "yeah", "confirm", "correct", "sure", "ok"
 UNKNOWN - greetings, thanks, gibberish, unrelated
 
 EXAMPLES:
 "dentist Friday 3pm" → CREATE
 "coffee with maya tmrw morning" → CREATE
 "block off sunday afternoon" → CREATE
-"remind me about the gym in 2 hours" → CREATE
 "gym every tuesday 7am" → RECURRING
 "weekly sync mondays at 10" → RECURRING
-"daily standup 9am" → RECURRING
 "cancel my dentist appt" → DELETE
 "remove the thing friday" → DELETE
-"delete my 3pm" → DELETE
 "what do i have this week" → LIST
 "anything tomorrow?" → LIST
-"show my schedule" → LIST
+"yes" → CONFIRM
+"yeah that's right" → CONFIRM
 "thanks" → UNKNOWN
-"ok cool" → UNKNOWN
 "lol" → UNKNOWN
 
 Message: "{message}" """
@@ -80,7 +78,7 @@ Message: "{message}" """
     return response.text.strip().upper()
 
 
-def parse_event(message):
+def parse_event(message, last_event=None):
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
     today = now.strftime("%Y-%m-%d")
     today_display = now.strftime("%A, %B %d, %Y")
@@ -88,11 +86,21 @@ def parse_event(message):
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
     in_2h = (now + timedelta(hours=2)).strftime("%H:%M")
     in_30m = (now + timedelta(minutes=30)).strftime("%H:%M")
+    last_event_context = f"\nLast event discussed: {json.dumps(last_event)}" if last_event else ""
 
     prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Parse the user's message into a calendar event.
 
 Current date: {today} ({today_display})
-Current time: {current_time} (Pacific Time)
+Current time: {current_time} (Pacific Time){last_event_context}
+
+If the message seems to modify or reference a previous event, use that context to fill in missing fields.
+Be robust to typos, abbreviations, missing punctuation, all lowercase, all caps.
+Examples of messy input to handle:
+- "dntst fri 3p" → Dentist, Friday, 15:00
+- "gym tmrw mornin" → Gym, tomorrow, 09:00
+- "mtg w/ jake mon 2" → Meeting with Jake, Monday, 14:00
+
+If a field is ambiguous, make your best inference from context. Only return null if there is truly no information to work with.
 
 Return ONLY a valid JSON object. No explanations, comments, markdown, or text outside the JSON.
 
@@ -102,7 +110,8 @@ OUTPUT SCHEMA:
   "date": "YYYY-MM-DD" | null,
   "time": "HH:MM" | null,
   "duration_minutes": integer | null,
-  "location": string | null
+  "location": string | null,
+  "confidence": "high" | "medium" | "low"
 }}
 
 TITLE:
@@ -128,7 +137,8 @@ TIME:
   - meeting, call, sync, lunch → ≤7 assume PM, 8-11 assume AM, 12 = noon
 - No time mentioned → null
 
-DURATION (use explicit value if stated, otherwise):
+DURATION:
+- Use explicit value if stated
 - "quick" → 30, "long" / "extended" → 120
 - coffee / chat / standup → 30
 - lunch / dinner / brunch / drinks → 75
@@ -146,9 +156,14 @@ LOCATION:
 - Never infer or hallucinate
 - No mention → null
 
+CONFIDENCE:
+- "high" → date, time, title all clearly stated
+- "medium" → one field inferred or ambiguous
+- "low" → multiple fields inferred, message is vague or very short
+
 EXAMPLE:
 "yo quick coffee with priya tmrw morning at blue bottle" →
-{{"title": "Coffee with Priya", "date": "{tomorrow}", "time": "09:00", "duration_minutes": 30, "location": "Blue Bottle"}}
+{{"title": "Coffee with Priya", "date": "{tomorrow}", "time": "09:00", "duration_minutes": 30, "location": "Blue Bottle", "confidence": "high"}}
 
 Message: "{message}" """
     response = client.models.generate_content(
@@ -177,13 +192,12 @@ OUTPUT SCHEMA:
 }}
 
 TITLE:
-- Short and searchable — use the core event keyword(s) only
-- Lowercase is fine, it will be used for fuzzy matching
+- Short and searchable — use core keyword(s) only, lowercase
 - Examples: "dentist", "coffee with jake", "team sync", "3pm meeting"
 
 DATE:
 - Resolve relative references using today's date
-- If no date mentioned → null
+- No date mentioned → null
 
 EXAMPLES:
 "cancel my dentist friday" → {{"title": "dentist", "date": null}}
@@ -206,7 +220,7 @@ def parse_recurring(message):
     today_display = now.strftime("%A, %B %d, %Y")
     current_time = now.strftime("%H:%M")
 
-    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Parse a recurring event from the user's message.
+    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Parse a recurring event.
 
 Current date: {today} ({today_display})
 Current time: {current_time} (Pacific Time)
@@ -228,7 +242,7 @@ TITLE:
 
 TIME:
 - "morning" → 09:00, "afternoon" → 14:00, "evening" → 18:00, "night" → 20:00, "noon" → 12:00
-- Ambiguous bare number → resolve by event type (same rules as one-off events)
+- Ambiguous bare number → resolve by event type
 - No time → null
 
 RECURRENCE:
@@ -249,7 +263,6 @@ EXAMPLES:
 "gym every tuesday 7am" → {{"title": "Gym", "time": "07:00", "duration_minutes": 60, "recurrence": "WEEKLY", "day_of_week": "TU"}}
 "daily standup at 9" → {{"title": "Standup", "time": "09:00", "duration_minutes": 30, "recurrence": "DAILY", "day_of_week": null}}
 "weekly sync mondays at 10am for 30 mins" → {{"title": "Weekly Sync", "time": "10:00", "duration_minutes": 30, "recurrence": "WEEKLY", "day_of_week": "MO"}}
-"monthly dentist checkup" → {{"title": "Dentist Checkup", "time": null, "duration_minutes": 60, "recurrence": "MONTHLY", "day_of_week": null}}
 
 Message: "{message}" """
     response = client.models.generate_content(
@@ -272,10 +285,18 @@ def get_calendar_service(user):
     return build("calendar", "v3", credentials=creds)
 
 def handle_create(user, text, phone):
-    event_data = parse_event(text)
+    event_data = parse_event(text, last_event=user.last_event)
     if not event_data.get("date") or not event_data.get("time"):
         send_whatsapp(phone, "I couldn't figure out the date or time — can you be more specific?")
         return
+
+    if event_data.get("confidence") == "low":
+        user.last_event = event_data
+        db.session.commit()
+        location_str = f" at {event_data['location']}" if event_data.get("location") else ""
+        send_whatsapp(phone, f"Just to confirm — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}? Reply 'yes' to confirm or correct me.")
+        return
+
     service = get_calendar_service(user)
     start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
     end = start + timedelta(minutes=event_data.get("duration_minutes") or 60)
@@ -284,8 +305,36 @@ def handle_create(user, text, phone):
         "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
         "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
     }
+    if event_data.get("location"):
+        event["location"] = event_data["location"]
     service.events().insert(calendarId="primary", body=event).execute()
-    send_whatsapp(phone, f"✅ Added: {event_data['title']} on {event_data['date']} at {event_data['time']}")
+
+    user.last_event = event_data
+    db.session.commit()
+
+    location_str = f" at {event_data['location']}" if event_data.get("location") else ""
+    send_whatsapp(phone, f"Done ✅ {event_data['title']}{location_str} — {event_data['date']} at {event_data['time']}")
+
+def handle_confirm(user, phone):
+    if not user.last_event:
+        send_whatsapp(phone, "Nothing to confirm — what would you like to add?")
+        return
+    event_data = user.last_event
+    service = get_calendar_service(user)
+    start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
+    end = start + timedelta(minutes=event_data.get("duration_minutes") or 60)
+    event = {
+        "summary": event_data["title"],
+        "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
+        "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
+    }
+    if event_data.get("location"):
+        event["location"] = event_data["location"]
+    service.events().insert(calendarId="primary", body=event).execute()
+    user.last_event = None
+    db.session.commit()
+    location_str = f" at {event_data['location']}" if event_data.get("location") else ""
+    send_whatsapp(phone, f"Done ✅ {event_data['title']}{location_str} — {event_data['date']} at {event_data['time']}")
 
 def handle_delete(user, text, phone):
     delete_data = parse_delete(text)
@@ -346,6 +395,7 @@ def handle_create(user, text, phone):
     service.events().insert(calendarId="primary", body=event).execute()
     location_str = f" at {event_data['location']}" if event_data.get("location") else ""
     send_whatsapp(phone, f"Done ✅ {event_data['title']}{location_str} — {event_data['date']} at {event_data['time']}")
+
 
 # ── WhatsApp ────────────────────────────────────────────────
 
@@ -575,6 +625,8 @@ def webhook():
         intent = classify_intent(text)
         if intent == "CREATE":
             handle_create(user, text, phone)
+        elif intent == "CONFIRM":
+            handle_confirm(user, phone)
         elif intent == "DELETE":
             handle_delete(user, text, phone)
         elif intent == "LIST":
@@ -582,7 +634,7 @@ def webhook():
         elif intent == "RECURRING":
             handle_recurring(user, text, phone)
         else:
-            send_whatsapp(phone, "I didn't understand that. Try something like:\n• 'dentist Friday at 3pm'\n• 'every Monday gym at 7am'\n• 'cancel my dentist appointment'\n• 'what do I have this week?'")
+            send_whatsapp(phone, "Hmm, not sure what to do with that. Try something like:\n• 'dentist Friday 3pm'\n• 'gym every tuesday 7am'\n• 'cancel my dentist'\n• 'what's on my calendar?'")
     except Exception as e:
         print(f"Error: {e}")
         send_whatsapp(phone, "Something went wrong — please try again in a moment.")
