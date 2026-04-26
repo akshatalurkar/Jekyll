@@ -40,14 +40,38 @@ BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 # ── Gemini helpers ──────────────────────────────────────────
 
 def classify_intent(message):
-    prompt = f"""Classify this message into one of these categories:
-CREATE - user wants to add a calendar event
-DELETE - user wants to cancel or remove an event
-LIST - user wants to see upcoming events
-RECURRING - user wants to add a repeating event
-UNKNOWN - none of the above
+    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Classify the user's intent.
 
-Return ONLY the category word, nothing else.
+Current date: {datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")}
+Current time: {datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%H:%M")} PT
+
+Return ONLY one word — no punctuation, no explanation.
+
+CATEGORIES:
+CREATE - adding any new event, appointment, reminder, or block
+RECURRING - adding a repeating or regular event (contains: "every", "weekly", "daily", "each", "every week")
+DELETE - canceling, removing, or deleting an existing event
+LIST - asking what's on the calendar, what's coming up, any upcoming events
+UNKNOWN - greetings, thanks, gibberish, unrelated
+
+EXAMPLES:
+"dentist Friday 3pm" → CREATE
+"coffee with maya tmrw morning" → CREATE
+"block off sunday afternoon" → CREATE
+"remind me about the gym in 2 hours" → CREATE
+"gym every tuesday 7am" → RECURRING
+"weekly sync mondays at 10" → RECURRING
+"daily standup 9am" → RECURRING
+"cancel my dentist appt" → DELETE
+"remove the thing friday" → DELETE
+"delete my 3pm" → DELETE
+"what do i have this week" → LIST
+"anything tomorrow?" → LIST
+"show my schedule" → LIST
+"thanks" → UNKNOWN
+"ok cool" → UNKNOWN
+"lol" → UNKNOWN
+
 Message: "{message}" """
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -55,14 +79,77 @@ Message: "{message}" """
     )
     return response.text.strip().upper()
 
+
 def parse_event(message):
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
-    today = now.strftime("%A, %B %d, %Y")
+    today = now.strftime("%Y-%m-%d")
+    today_display = now.strftime("%A, %B %d, %Y")
     current_time = now.strftime("%H:%M")
-    prompt = f"""Today is {today} and the current time is {current_time}.
-Extract calendar event details from this message and return ONLY a JSON object with these fields:
-title, date (YYYY-MM-DD), time (HH:MM, 24hr), duration_minutes.
-Set any missing fields to null.
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    in_2h = (now + timedelta(hours=2)).strftime("%H:%M")
+    in_30m = (now + timedelta(minutes=30)).strftime("%H:%M")
+
+    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Parse the user's message into a calendar event.
+
+Current date: {today} ({today_display})
+Current time: {current_time} (Pacific Time)
+
+Return ONLY a valid JSON object. No explanations, comments, markdown, or text outside the JSON.
+
+OUTPUT SCHEMA:
+{{
+  "title": string,
+  "date": "YYYY-MM-DD" | null,
+  "time": "HH:MM" | null,
+  "duration_minutes": integer | null,
+  "location": string | null
+}}
+
+TITLE:
+- Clean, concise, properly capitalized
+- Preserve context ("Coffee with Maya", not "Coffee")
+- Strip leading filler: "let's", "gonna", "need to", "i need to", "remember to", "don't forget to", "gotta", "have to", "want to"
+
+DATE:
+- "today" → {today}
+- "tmrw" / "tomorrow" → {tomorrow}
+- "next [weekday]" → upcoming occurrence, NEVER today
+- "this [weekday]" → upcoming or same-day occurrence
+- Bare weekday ("Monday", "Fri") → nearest future occurrence, not today
+- "in N days" → today + N
+- No date mentioned → null
+
+TIME:
+- "morning" → 09:00, "afternoon" → 14:00, "evening" → 18:00, "night" → 20:00, "noon" → 12:00, "eod" → 17:00
+- "in 2 hours" → {in_2h}, "in 30 mins" → {in_30m} (round to nearest 5 min)
+- Ambiguous bare number ("at 8", "at 7") — resolve by event type:
+  - gym, run, yoga, breakfast, standup → AM
+  - dinner, drinks, bar, party, movie → PM
+  - meeting, call, sync, lunch → ≤7 assume PM, 8-11 assume AM, 12 = noon
+- No time mentioned → null
+
+DURATION (use explicit value if stated, otherwise):
+- "quick" → 30, "long" / "extended" → 120
+- coffee / chat / standup → 30
+- lunch / dinner / brunch / drinks → 75
+- doctor / dentist / checkup / therapy → 60
+- gym / workout / run / yoga / hike → 60
+- class / lecture / lab / workshop → 90
+- meeting / sync / call / 1:1 → 45
+- interview → 60
+- haircut / barber / salon → 45
+- movie → 120
+- unknown type → 60
+
+LOCATION:
+- Only if explicitly mentioned (venue, address, "Zoom", "Google Meet")
+- Never infer or hallucinate
+- No mention → null
+
+EXAMPLE:
+"yo quick coffee with priya tmrw morning at blue bottle" →
+{{"title": "Coffee with Priya", "date": "{tomorrow}", "time": "09:00", "duration_minutes": 30, "location": "Blue Bottle"}}
+
 Message: "{message}" """
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -70,13 +157,40 @@ Message: "{message}" """
     )
     raw = response.text.strip().replace("```json", "").replace("```", "")
     return json.loads(raw)
+
 
 def parse_delete(message):
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
-    today = now.strftime("%A, %B %d, %Y")
-    prompt = f"""Today is {today}.
-Extract the event the user wants to delete from this message and return ONLY a JSON object with:
-title (the event name to search for), date (YYYY-MM-DD, or null if not specified).
+    today = now.strftime("%Y-%m-%d")
+    today_display = now.strftime("%A, %B %d, %Y")
+
+    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Extract the event the user wants to delete.
+
+Current date: {today} ({today_display})
+
+Return ONLY a valid JSON object. No explanations, comments, or markdown.
+
+OUTPUT SCHEMA:
+{{
+  "title": string,
+  "date": "YYYY-MM-DD" | null
+}}
+
+TITLE:
+- Short and searchable — use the core event keyword(s) only
+- Lowercase is fine, it will be used for fuzzy matching
+- Examples: "dentist", "coffee with jake", "team sync", "3pm meeting"
+
+DATE:
+- Resolve relative references using today's date
+- If no date mentioned → null
+
+EXAMPLES:
+"cancel my dentist friday" → {{"title": "dentist", "date": null}}
+"remove the team sync tomorrow" → {{"title": "team sync", "date": null}}
+"delete my 3pm today" → {{"title": "3pm", "date": "{today}"}}
+"get rid of coffee with jake" → {{"title": "coffee with jake", "date": null}}
+
 Message: "{message}" """
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -85,16 +199,58 @@ Message: "{message}" """
     raw = response.text.strip().replace("```json", "").replace("```", "")
     return json.loads(raw)
 
+
 def parse_recurring(message):
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
-    today = now.strftime("%A, %B %d, %Y")
+    today = now.strftime("%Y-%m-%d")
+    today_display = now.strftime("%A, %B %d, %Y")
     current_time = now.strftime("%H:%M")
-    prompt = f"""Today is {today} and the current time is {current_time}.
-Extract recurring event details from this message and return ONLY a JSON object with:
-title, time (HH:MM, 24hr), duration_minutes, 
-recurrence (one of: DAILY, WEEKLY, MONTHLY),
-day_of_week (e.g. MO, TU, WE, TH, FR, SA, SU — only for WEEKLY, else null).
-Set any missing fields to null.
+
+    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Parse a recurring event from the user's message.
+
+Current date: {today} ({today_display})
+Current time: {current_time} (Pacific Time)
+
+Return ONLY a valid JSON object. No explanations, comments, or markdown.
+
+OUTPUT SCHEMA:
+{{
+  "title": string,
+  "time": "HH:MM" | null,
+  "duration_minutes": integer | null,
+  "recurrence": "DAILY" | "WEEKLY" | "MONTHLY",
+  "day_of_week": "MO" | "TU" | "WE" | "TH" | "FR" | "SA" | "SU" | null
+}}
+
+TITLE:
+- Clean, concise, properly capitalized
+- Strip leading filler words
+
+TIME:
+- "morning" → 09:00, "afternoon" → 14:00, "evening" → 18:00, "night" → 20:00, "noon" → 12:00
+- Ambiguous bare number → resolve by event type (same rules as one-off events)
+- No time → null
+
+RECURRENCE:
+- "every day" / "daily" → DAILY, day_of_week = null
+- "every [weekday]" / "weekly on [weekday]" → WEEKLY + set day_of_week
+- "every week" with no day → WEEKLY, day_of_week = null
+- "every month" / "monthly" → MONTHLY, day_of_week = null
+
+DURATION:
+- "quick" → 30, "long" → 120
+- standup / scrum → 30
+- gym / workout / run / yoga → 60
+- class / lecture → 90
+- meeting / sync → 45
+- default → 60
+
+EXAMPLES:
+"gym every tuesday 7am" → {{"title": "Gym", "time": "07:00", "duration_minutes": 60, "recurrence": "WEEKLY", "day_of_week": "TU"}}
+"daily standup at 9" → {{"title": "Standup", "time": "09:00", "duration_minutes": 30, "recurrence": "DAILY", "day_of_week": null}}
+"weekly sync mondays at 10am for 30 mins" → {{"title": "Weekly Sync", "time": "10:00", "duration_minutes": 30, "recurrence": "WEEKLY", "day_of_week": "MO"}}
+"monthly dentist checkup" → {{"title": "Dentist Checkup", "time": null, "duration_minutes": 60, "recurrence": "MONTHLY", "day_of_week": null}}
+
 Message: "{message}" """
     response = client.models.generate_content(
         model="gemini-2.5-flash",
@@ -172,32 +328,24 @@ def handle_list(user, phone):
         lines.append(f"• {e['summary']} — {dt.strftime('%a %b %d at %I:%M %p')}")
     send_whatsapp(phone, "\n".join(lines))
 
-def handle_recurring(user, text, phone):
-    event_data = parse_recurring(text)
-    if not event_data.get("time") or not event_data.get("recurrence"):
-        send_whatsapp(phone, "I couldn't figure out the time or frequency — can you be more specific?")
+def handle_create(user, text, phone):
+    event_data = parse_event(text)
+    if not event_data.get("date") or not event_data.get("time"):
+        send_whatsapp(phone, "I couldn't figure out the date or time — can you be more specific?")
         return
     service = get_calendar_service(user)
-    today = date.today()
-    start = datetime.strptime(f"{today} {event_data['time']}", "%Y-%m-%d %H:%M")
+    start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
     end = start + timedelta(minutes=event_data.get("duration_minutes") or 60)
-    recurrence = event_data["recurrence"]
-    if recurrence == "WEEKLY" and event_data.get("day_of_week"):
-        rrule = f"RRULE:FREQ=WEEKLY;BYDAY={event_data['day_of_week']}"
-    elif recurrence == "DAILY":
-        rrule = "RRULE:FREQ=DAILY"
-    elif recurrence == "MONTHLY":
-        rrule = "RRULE:FREQ=MONTHLY"
-    else:
-        rrule = "RRULE:FREQ=WEEKLY"
     event = {
         "summary": event_data["title"],
         "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
         "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
-        "recurrence": [rrule],
     }
+    if event_data.get("location"):
+        event["location"] = event_data["location"]
     service.events().insert(calendarId="primary", body=event).execute()
-    send_whatsapp(phone, f"🔁 Recurring event added: {event_data['title']} — {recurrence.lower()}")
+    location_str = f" at {event_data['location']}" if event_data.get("location") else ""
+    send_whatsapp(phone, f"Done ✅ {event_data['title']}{location_str} — {event_data['date']} at {event_data['time']}")
 
 # ── WhatsApp ────────────────────────────────────────────────
 
