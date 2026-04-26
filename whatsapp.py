@@ -463,7 +463,7 @@ def oauth_callback():
     user.oauth_token = token["access_token"]
     user.refresh_token = token.get("refresh_token")
     db.session.commit()
-    return "Calendar connected! You can close this tab."
+    return render_template_string(SUCCESS_PAGE)
 
 if __name__ == "__main__":
     app.run(port=int(os.getenv("PORT", 8001)))
