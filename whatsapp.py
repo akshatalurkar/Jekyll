@@ -380,29 +380,6 @@ def webhook():
 
     return "OK", 200
 
-@app.route("/auth/<phone>")
-def auth(phone):
-    code_verifier = secrets.token_urlsafe(64)
-    code_challenge = base64.urlsafe_b64encode(
-        hashlib.sha256(code_verifier.encode()).digest()
-    ).rstrip(b"=").decode()
-    oauth = OAuth2Session(
-        client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        redirect_uri=f"{BASE_URL}/oauth/callback",
-        scope=["https://www.googleapis.com/auth/calendar.events"]
-    )
-    auth_url, state = oauth.authorization_url(
-        "https://accounts.google.com/o/oauth2/auth",
-        access_type="offline",
-        prompt="consent",
-        code_challenge=code_challenge,
-        code_challenge_method="S256"
-    )
-    session["state"] = state
-    session["phone"] = phone
-    session["code_verifier"] = code_verifier
-    return render_template_string(AUTH_PAGE, phone=phone, auth_url=auth_url)
-
 @app.route("/oauth/callback")
 def oauth_callback():
     phone = session.get("phone")
