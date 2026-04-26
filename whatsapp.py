@@ -1,19 +1,17 @@
 import os
-import sys
 import json
 import secrets
 import hashlib
 import base64
-import requests as http_requests
+import requests
 from datetime import date, datetime, timedelta
 from flask import Flask, request, session
 from dotenv import load_dotenv
 from flask_sqlalchemy import SQLAlchemy
 from google import genai
-from requests_oauthlib import OAuth2Session
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
-
+from requests_oauthlib import OAuth2Session
 
 load_dotenv()
 os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
@@ -69,40 +67,57 @@ def create_calendar_event(user, event_data):
     }
     return service.events().insert(calendarId="primary", body=event).execute()
 
-def send_sms(to, text):
-    http_requests.post(
-        "https://api.telnyx.com/v2/messages",
+def send_whatsapp(to, text):
+    requests.post(
+        f"https://graph.facebook.com/v18.0/{os.getenv('WHATSAPP_PHONE_NUMBER_ID')}/messages",
         headers={
-            "Authorization": f"Bearer {os.getenv('TELNYX_API_KEY')}",
+            "Authorization": f"Bearer {os.getenv('WHATSAPP_TOKEN')}",
             "Content-Type": "application/json"
         },
         json={
-            "from": os.getenv("TELNYX_PHONE_NUMBER"),
+            "messaging_product": "whatsapp",
             "to": to,
-            "text": text
+            "type": "text",
+            "text": {"body": text}
         }
     )
 
-@app.route("/webhook", methods=["POST"])
+@app.route("/webhook", methods=["GET", "POST"])
 def webhook():
+    if request.method == "GET":
+        mode = request.args.get("hub.mode")
+        token = request.args.get("hub.verify_token")
+        challenge = request.args.get("hub.challenge")
+        if mode == "subscribe" and token == os.getenv("WHATSAPP_VERIFY_TOKEN"):
+            return challenge, 200
+        return "Forbidden", 403
+
     print("Webhook hit!")
     body = request.json
     print(body)
 
     try:
-        phone = body["data"]["payload"]["from"]["phone_number"]
-        message = body["data"]["payload"]["text"]
-    except (KeyError, TypeError):
+        entry = body["entry"][0]
+        change = entry["changes"][0]
+        message = change["value"]["messages"][0]
+        phone = message["from"]
+        if not phone.startswith("+"):
+            phone = "+" + phone
+        text = message["text"]["body"]
+        print(f"Phone: {phone}")
+        print(f"Text: {text}")
+    except (KeyError, IndexError, TypeError):
         return "OK", 200
 
     user = User.query.filter_by(phone=phone).first()
+    print(f"User found: {user}")
 
     if not user or not user.oauth_token:
-        send_sms(phone, f"Welcome! Connect your Google Calendar first: http://localhost:8000/auth/{phone}")
+        send_whatsapp(phone, f"Welcome! Connect your Google Calendar: http://localhost:8001/auth/{phone}")
         return "OK", 200
 
     try:
-        event_data = parse_event(message)
+        event_data = parse_event(text)
         if not event_data.get("date") or not event_data.get("time"):
             confirmation = "I couldn't figure out the date or time — can you be more specific?"
         else:
@@ -112,7 +127,7 @@ def webhook():
         print(f"Error: {e}")
         confirmation = "Something went wrong — please try again in a moment."
 
-    send_sms(phone, confirmation)
+    send_whatsapp(phone, confirmation)
     return "OK", 200
 
 @app.route("/auth/<phone>")
@@ -121,10 +136,9 @@ def auth(phone):
     code_challenge = base64.urlsafe_b64encode(
         hashlib.sha256(code_verifier.encode()).digest()
     ).rstrip(b"=").decode()
-
     oauth = OAuth2Session(
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        redirect_uri="http://localhost:8000/oauth/callback",
+        redirect_uri="http://localhost:8001/oauth/callback",
         scope=["https://www.googleapis.com/auth/calendar.events"]
     )
     auth_url, state = oauth.authorization_url(
@@ -145,7 +159,7 @@ def oauth_callback():
     code_verifier = session.get("code_verifier")
     oauth = OAuth2Session(
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        redirect_uri="http://localhost:8000/oauth/callback",
+        redirect_uri="http://localhost:8001/oauth/callback",
         state=session.get("state")
     )
     token = oauth.fetch_token(
@@ -164,4 +178,4 @@ def oauth_callback():
     return "Calendar connected! You can close this tab."
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8000)
+    app.run(debug=True, port=8001)
