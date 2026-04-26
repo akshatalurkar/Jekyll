@@ -1,1 +1,1 @@
-web: gunicorn --bind 0.0.0.0:$PORT whatsapp:app
+web: gunicorn --bind 0.0.0.0:10000 whatsapp:app
