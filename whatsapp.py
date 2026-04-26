@@ -12,6 +12,7 @@ from google import genai
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from requests_oauthlib import OAuth2Session
+from zoneinfo import ZoneInfo
 
 load_dotenv()
 
@@ -55,7 +56,7 @@ Message: "{message}" """
     return response.text.strip().upper()
 
 def parse_event(message):
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("America/Los_Angeles"))
     today = now.strftime("%A, %B %d, %Y")
     current_time = now.strftime("%H:%M")
     prompt = f"""Today is {today} and the current time is {current_time}.
@@ -71,7 +72,7 @@ Message: "{message}" """
     return json.loads(raw)
 
 def parse_delete(message):
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("America/Los_Angeles"))
     today = now.strftime("%A, %B %d, %Y")
     prompt = f"""Today is {today}.
 Extract the event the user wants to delete from this message and return ONLY a JSON object with:
@@ -85,7 +86,7 @@ Message: "{message}" """
     return json.loads(raw)
 
 def parse_recurring(message):
-    now = datetime.now()
+    now = datetime.now(ZoneInfo("America/Los_Angeles"))
     today = now.strftime("%A, %B %d, %Y")
     current_time = now.strftime("%H:%M")
     prompt = f"""Today is {today} and the current time is {current_time}.
@@ -227,7 +228,7 @@ AUTH_PAGE = """<!DOCTYPE html>
 <link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
 <style>
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
-  body { min-height: 100vh; background: #0b0d10; font-family: 'DM Sans', sans-serif; color: #e8e4de; display: flex; align-items: center; justify-content: center; padding: 2rem 1.5rem; position: relative; overflow: hidden; }
+  body { min-height: 100vh; background: #0b0d10; font-family: 'DM Sans', sans-serif; color: #e8e4de; display: flex; align-items: center; justify-content: center; padding: 2rem 1.5rem; position: relative; overflow-y: auto; }
   .bg-grid { position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px); background-size: 48px 48px; pointer-events: none; }
   .bg-glow { position: fixed; width: 560px; height: 560px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.13) 0%, rgba(37,211,102,0.04) 45%, transparent 70%); top: -150px; right: -100px; pointer-events: none; }
   .bg-glow-2 { position: fixed; width: 480px; height: 480px; border-radius: 50%; background: radial-gradient(circle, rgba(18,140,65,0.11) 0%, rgba(18,140,65,0.04) 45%, transparent 70%); bottom: -120px; left: -100px; pointer-events: none; }
@@ -294,6 +295,78 @@ AUTH_PAGE = """<!DOCTYPE html>
       <div class="step"><div class="step-num">3</div><div class="step-text">Text Jekyll anything — "dentist Friday at 3pm" — and you're live</div></div>
     </div>
     <p class="footer">Jekyll only reads and writes calendar events.<br>Your data is never stored or shared.</p>
+  </div>
+</body>
+</html>"""
+
+SUCCESS_PAGE = """<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jekyll — Connected!</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { min-height: 100vh; background: #0b0d10; font-family: 'DM Sans', sans-serif; color: #e8e4de; display: flex; align-items: center; justify-content: center; padding: 2rem 1.5rem; position: relative; overflow-y: auto; }
+  .bg-grid { position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px); background-size: 48px 48px; pointer-events: none; }
+  .bg-glow { position: fixed; width: 560px; height: 560px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.18) 0%, rgba(37,211,102,0.06) 45%, transparent 70%); top: -150px; right: -100px; pointer-events: none; }
+  .bg-glow-2 { position: fixed; width: 480px; height: 480px; border-radius: 50%; background: radial-gradient(circle, rgba(18,140,65,0.14) 0%, rgba(18,140,65,0.04) 45%, transparent 70%); bottom: -120px; left: -100px; pointer-events: none; }
+  .bg-glow-3 { position: fixed; width: 200px; height: 200px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.08) 0%, transparent 70%); top: 40%; left: 10%; pointer-events: none; }
+  .card { position: relative; width: 100%; max-width: 420px; background: #12151a; border: 0.5px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 3rem 2.5rem; animation: fadeUp 0.6s cubic-bezier(0.22,1,0.36,1) both; text-align: center; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+  .check-ring { width: 72px; height: 72px; border-radius: 50%; background: rgba(37,211,102,0.1); border: 0.5px solid rgba(37,211,102,0.3); display: flex; align-items: center; justify-content: center; margin: 0 auto 2rem; animation: popIn 0.5s cubic-bezier(0.34,1.56,0.64,1) 0.3s both; }
+  @keyframes popIn { from { opacity: 0; transform: scale(0.6); } to { opacity: 1; transform: scale(1); } }
+  .logo-row { display: flex; align-items: center; justify-content: center; gap: 10px; margin-bottom: 2rem; }
+  .logo-icon { width: 28px; height: 28px; background: #25D366; border-radius: 7px; display: flex; align-items: center; justify-content: center; }
+  .logo-name { font-family: 'Syne', sans-serif; font-size: 20px; font-weight: 700; letter-spacing: -0.5px; color: #e8e4de; }
+  .heading { font-family: 'Syne', sans-serif; font-size: 26px; font-weight: 600; line-height: 1.25; color: #e8e4de; margin-bottom: 0.6rem; letter-spacing: -0.5px; }
+  .heading em { font-style: normal; color: #25D366; }
+  .subtext { font-size: 14px; color: rgba(232,228,222,0.45); line-height: 1.6; margin-bottom: 2rem; }
+  .divider { height: 0.5px; background: rgba(255,255,255,0.07); margin-bottom: 2rem; }
+  .examples-label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(232,228,222,0.25); margin-bottom: 1rem; font-family: 'Syne', sans-serif; }
+  .bubbles { display: flex; flex-direction: column; gap: 8px; text-align: left; }
+  .bubble { background: rgba(37,211,102,0.06); border: 0.5px solid rgba(37,211,102,0.15); border-radius: 12px 12px 12px 3px; padding: 10px 14px; font-size: 13px; color: rgba(232,228,222,0.7); animation: slideIn 0.4s cubic-bezier(0.22,1,0.36,1) both; }
+  .bubble:nth-child(1) { animation-delay: 0.6s; }
+  .bubble:nth-child(2) { animation-delay: 0.75s; }
+  .bubble:nth-child(3) { animation-delay: 0.9s; }
+  @keyframes slideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+  .close-note { margin-top: 2rem; font-size: 12px; color: rgba(232,228,222,0.2); line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="bg-glow"></div>
+  <div class="bg-glow-2"></div>
+  <div class="bg-glow-3"></div>
+  <div class="card">
+    <div class="logo-row">
+      <div class="logo-icon">
+        <svg viewBox="0 0 18 18" width="16" height="16" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="4" width="14" height="11" rx="2" stroke="#0b0d10" stroke-width="1.5"/>
+          <path d="M6 2v4M12 2v4" stroke="#0b0d10" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M2 8h14" stroke="#0b0d10" stroke-width="1.5"/>
+          <circle cx="6.5" cy="12" r="1" fill="#0b0d10"/>
+          <circle cx="9.5" cy="12" r="1" fill="#0b0d10"/>
+        </svg>
+      </div>
+      <span class="logo-name">Jekyll</span>
+    </div>
+    <div class="check-ring">
+      <svg width="32" height="32" viewBox="0 0 32 32" fill="none" xmlns="http://www.w3.org/2000/svg">
+        <path d="M8 16.5l5.5 5.5 10-11" stroke="#25D366" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"/>
+      </svg>
+    </div>
+    <h1 class="heading">You're <em>all set.</em></h1>
+    <p class="subtext">Google Calendar is connected. Head back to WhatsApp and start texting Jekyll.</p>
+    <div class="divider"></div>
+    <p class="examples-label">Try saying</p>
+    <div class="bubbles">
+      <div class="bubble">dentist appointment Friday at 3pm</div>
+      <div class="bubble">every Monday gym at 7am</div>
+      <div class="bubble">what do I have this week?</div>
+    </div>
+    <p class="close-note">You can close this tab and return to WhatsApp.</p>
   </div>
 </body>
 </html>"""
