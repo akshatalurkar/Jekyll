@@ -1,1 +1,1 @@
-web: python whatsapp.py
+web: gunicorn --bind 0.0.0.0:$PORT whatsapp:app
