@@ -34,12 +34,31 @@ with app.app_context():
     db.create_all()
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
-
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 
+# ── Gemini helpers ──────────────────────────────────────────
+
+def classify_intent(message):
+    prompt = f"""Classify this message into one of these categories:
+CREATE - user wants to add a calendar event
+DELETE - user wants to cancel or remove an event
+LIST - user wants to see upcoming events
+RECURRING - user wants to add a repeating event
+UNKNOWN - none of the above
+
+Return ONLY the category word, nothing else.
+Message: "{message}" """
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
+    return response.text.strip().upper()
+
 def parse_event(message):
-    today = date.today().strftime("%A, %B %d, %Y")
-    prompt = f"""Today is {today}.
+    now = datetime.now()
+    today = now.strftime("%A, %B %d, %Y")
+    current_time = now.strftime("%H:%M")
+    prompt = f"""Today is {today} and the current time is {current_time}.
 Extract calendar event details from this message and return ONLY a JSON object with these fields:
 title, date (YYYY-MM-DD), time (HH:MM, 24hr), duration_minutes.
 Set any missing fields to null.
@@ -51,7 +70,41 @@ Message: "{message}" """
     raw = response.text.strip().replace("```json", "").replace("```", "")
     return json.loads(raw)
 
-def create_calendar_event(user, event_data):
+def parse_delete(message):
+    now = datetime.now()
+    today = now.strftime("%A, %B %d, %Y")
+    prompt = f"""Today is {today}.
+Extract the event the user wants to delete from this message and return ONLY a JSON object with:
+title (the event name to search for), date (YYYY-MM-DD, or null if not specified).
+Message: "{message}" """
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
+    raw = response.text.strip().replace("```json", "").replace("```", "")
+    return json.loads(raw)
+
+def parse_recurring(message):
+    now = datetime.now()
+    today = now.strftime("%A, %B %d, %Y")
+    current_time = now.strftime("%H:%M")
+    prompt = f"""Today is {today} and the current time is {current_time}.
+Extract recurring event details from this message and return ONLY a JSON object with:
+title, time (HH:MM, 24hr), duration_minutes, 
+recurrence (one of: DAILY, WEEKLY, MONTHLY),
+day_of_week (e.g. MO, TU, WE, TH, FR, SA, SU — only for WEEKLY, else null).
+Set any missing fields to null.
+Message: "{message}" """
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
+    raw = response.text.strip().replace("```json", "").replace("```", "")
+    return json.loads(raw)
+
+# ── Google Calendar helpers ─────────────────────────────────
+
+def get_calendar_service(user):
     creds = Credentials(
         token=user.oauth_token,
         refresh_token=user.refresh_token,
@@ -59,17 +112,93 @@ def create_calendar_event(user, event_data):
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
     )
-    service = build("calendar", "v3", credentials=creds)
-    start = datetime.strptime(
-        f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M"
-    )
-    end = start + timedelta(minutes=event_data["duration_minutes"] or 60)
+    return build("calendar", "v3", credentials=creds)
+
+def handle_create(user, text, phone):
+    event_data = parse_event(text)
+    if not event_data.get("date") or not event_data.get("time"):
+        send_whatsapp(phone, "I couldn't figure out the date or time — can you be more specific?")
+        return
+    service = get_calendar_service(user)
+    start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
+    end = start + timedelta(minutes=event_data.get("duration_minutes") or 60)
     event = {
         "summary": event_data["title"],
         "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
         "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
     }
-    return service.events().insert(calendarId="primary", body=event).execute()
+    service.events().insert(calendarId="primary", body=event).execute()
+    send_whatsapp(phone, f"✅ Added: {event_data['title']} on {event_data['date']} at {event_data['time']}")
+
+def handle_delete(user, text, phone):
+    delete_data = parse_delete(text)
+    title = delete_data.get("title", "").lower()
+    service = get_calendar_service(user)
+    now = datetime.utcnow().isoformat() + "Z"
+    events_result = service.events().list(
+        calendarId="primary",
+        timeMin=now,
+        maxResults=10,
+        singleEvents=True,
+        orderBy="startTime"
+    ).execute()
+    events = events_result.get("items", [])
+    match = next((e for e in events if title in e.get("summary", "").lower()), None)
+    if not match:
+        send_whatsapp(phone, f"I couldn't find an upcoming event matching '{delete_data['title']}'.")
+        return
+    service.events().delete(calendarId="primary", eventId=match["id"]).execute()
+    send_whatsapp(phone, f"🗑️ Deleted: {match['summary']}")
+
+def handle_list(user, phone):
+    service = get_calendar_service(user)
+    now = datetime.utcnow().isoformat() + "Z"
+    events_result = service.events().list(
+        calendarId="primary",
+        timeMin=now,
+        maxResults=5,
+        singleEvents=True,
+        orderBy="startTime"
+    ).execute()
+    events = events_result.get("items", [])
+    if not events:
+        send_whatsapp(phone, "You have no upcoming events.")
+        return
+    lines = ["📅 Your next events:"]
+    for e in events:
+        start = e["start"].get("dateTime", e["start"].get("date"))
+        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        lines.append(f"• {e['summary']} — {dt.strftime('%a %b %d at %I:%M %p')}")
+    send_whatsapp(phone, "\n".join(lines))
+
+def handle_recurring(user, text, phone):
+    event_data = parse_recurring(text)
+    if not event_data.get("time") or not event_data.get("recurrence"):
+        send_whatsapp(phone, "I couldn't figure out the time or frequency — can you be more specific?")
+        return
+    service = get_calendar_service(user)
+    today = date.today()
+    start = datetime.strptime(f"{today} {event_data['time']}", "%Y-%m-%d %H:%M")
+    end = start + timedelta(minutes=event_data.get("duration_minutes") or 60)
+    recurrence = event_data["recurrence"]
+    if recurrence == "WEEKLY" and event_data.get("day_of_week"):
+        rrule = f"RRULE:FREQ=WEEKLY;BYDAY={event_data['day_of_week']}"
+    elif recurrence == "DAILY":
+        rrule = "RRULE:FREQ=DAILY"
+    elif recurrence == "MONTHLY":
+        rrule = "RRULE:FREQ=MONTHLY"
+    else:
+        rrule = "RRULE:FREQ=WEEKLY"
+    event = {
+        "summary": event_data["title"],
+        "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
+        "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
+        "recurrence": [rrule],
+    }
+    service.events().insert(calendarId="primary", body=event).execute()
+    send_whatsapp(phone, f"🔁 Recurring event added: {event_data['title']} — {recurrence.lower()}")
+
+# ── WhatsApp ────────────────────────────────────────────────
 
 def send_whatsapp(to, text):
     response = requests.post(
@@ -86,6 +215,8 @@ def send_whatsapp(to, text):
         }
     )
     return response.json()
+
+# ── Routes ──────────────────────────────────────────────────
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -113,21 +244,25 @@ def webhook():
     user = User.query.filter_by(phone=phone).first()
 
     if not user or not user.oauth_token:
-        send_whatsapp(phone, f"Welcome! Connect your Google Calendar: {BASE_URL}/auth/{phone}")
+        send_whatsapp(phone, f"👋 Welcome to Jekyll — your text-to-calendar assistant!\n\nTo get started, connect your Google Calendar by clicking this link:\n{BASE_URL}/auth/{phone}\n\nOnce connected, just text me anything you want to add to your calendar. Example: 'dentist Friday at 3pm'")
         return "OK", 200
 
     try:
-        event_data = parse_event(text)
-        if not event_data.get("date") or not event_data.get("time"):
-            confirmation = "I couldn't figure out the date or time — can you be more specific?"
+        intent = classify_intent(text)
+        if intent == "CREATE":
+            handle_create(user, text, phone)
+        elif intent == "DELETE":
+            handle_delete(user, text, phone)
+        elif intent == "LIST":
+            handle_list(user, phone)
+        elif intent == "RECURRING":
+            handle_recurring(user, text, phone)
         else:
-            create_calendar_event(user, event_data)
-            confirmation = f"Added: {event_data['title']} on {event_data['date']} at {event_data['time']}"
+            send_whatsapp(phone, "I didn't understand that. Try something like:\n• 'dentist Friday at 3pm'\n• 'every Monday gym at 7am'\n• 'cancel my dentist appointment'\n• 'what do I have this week?'")
     except Exception as e:
         print(f"Error: {e}")
-        confirmation = "Something went wrong — please try again in a moment."
+        send_whatsapp(phone, "Something went wrong — please try again in a moment.")
 
-    send_whatsapp(phone, confirmation)
     return "OK", 200
 
 @app.route("/auth/<phone>")
