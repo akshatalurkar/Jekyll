@@ -14,12 +14,14 @@ from googleapiclient.discovery import build
 from requests_oauthlib import OAuth2Session
 
 load_dotenv()
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-os.environ["OAUTHLIB_RELAX_TOKEN_SCOPE"] = "1"
+
+database_url = os.getenv("DATABASE_URL", "sqlite:///users.db")
+if database_url.startswith("postgres://"):
+    database_url = database_url.replace("postgres://", "postgresql://", 1)
 
 app = Flask(__name__)
-app.secret_key = secrets.token_hex(16)
-app.config["SQLALCHEMY_DATABASE_URI"] = "sqlite:///users.db"
+app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(16))
+app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 db = SQLAlchemy(app)
 
 class User(db.Model):
@@ -32,6 +34,8 @@ with app.app_context():
     db.create_all()
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
+
+BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 
 def parse_event(message):
     today = date.today().strftime("%A, %B %d, %Y")
@@ -109,7 +113,7 @@ def webhook():
     user = User.query.filter_by(phone=phone).first()
 
     if not user or not user.oauth_token:
-        send_whatsapp(phone, f"Welcome! Connect your Google Calendar: http://localhost:8001/auth/{phone}")
+        send_whatsapp(phone, f"Welcome! Connect your Google Calendar: {BASE_URL}/auth/{phone}")
         return "OK", 200
 
     try:
@@ -134,7 +138,7 @@ def auth(phone):
     ).rstrip(b"=").decode()
     oauth = OAuth2Session(
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        redirect_uri="http://localhost:8001/oauth/callback",
+        redirect_uri=f"{BASE_URL}/oauth/callback",
         scope=["https://www.googleapis.com/auth/calendar.events"]
     )
     auth_url, state = oauth.authorization_url(
@@ -155,7 +159,7 @@ def oauth_callback():
     code_verifier = session.get("code_verifier")
     oauth = OAuth2Session(
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        redirect_uri="http://localhost:8001/oauth/callback",
+        redirect_uri=f"{BASE_URL}/oauth/callback",
         state=session.get("state")
     )
     token = oauth.fetch_token(
@@ -174,4 +178,4 @@ def oauth_callback():
     return "Calendar connected! You can close this tab."
 
 if __name__ == "__main__":
-    app.run(debug=True, port=8001)
+    app.run(port=int(os.getenv("PORT", 8001)))
