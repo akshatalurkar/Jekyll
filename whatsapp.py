@@ -68,7 +68,7 @@ def create_calendar_event(user, event_data):
     return service.events().insert(calendarId="primary", body=event).execute()
 
 def send_whatsapp(to, text):
-    requests.post(
+    response = requests.post(
         f"https://graph.facebook.com/v18.0/{os.getenv('WHATSAPP_PHONE_NUMBER_ID')}/messages",
         headers={
             "Authorization": f"Bearer {os.getenv('WHATSAPP_TOKEN')}",
@@ -81,6 +81,7 @@ def send_whatsapp(to, text):
             "text": {"body": text}
         }
     )
+    return response.json()
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -92,9 +93,7 @@ def webhook():
             return challenge, 200
         return "Forbidden", 403
 
-    print("Webhook hit!")
     body = request.json
-    print(body)
 
     try:
         entry = body["entry"][0]
@@ -104,13 +103,10 @@ def webhook():
         if not phone.startswith("+"):
             phone = "+" + phone
         text = message["text"]["body"]
-        print(f"Phone: {phone}")
-        print(f"Text: {text}")
     except (KeyError, IndexError, TypeError):
         return "OK", 200
 
     user = User.query.filter_by(phone=phone).first()
-    print(f"User found: {user}")
 
     if not user or not user.oauth_token:
         send_whatsapp(phone, f"Welcome! Connect your Google Calendar: http://localhost:8001/auth/{phone}")
