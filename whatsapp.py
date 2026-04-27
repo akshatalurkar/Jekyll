@@ -242,13 +242,6 @@ def handle_create(user, text, phone, intent):
     if not event_data.get("date") or not event_data.get("time"):
         send_whatsapp(phone, "Got it — what date and time should I set this for?")
         return
-
-    if event_data.get("confidence") == "low":
-        user.last_event = event_data
-        db.session.commit()
-        location_str = f" at {event_data['location']}" if event_data.get("location") else ""
-        send_whatsapp(phone, f"Just to confirm — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}? Reply 'yes' and I'll add it.")
-        return
     
     user.last_event = event_data
     db.session.commit()
@@ -565,7 +558,6 @@ def webhook():
     except (KeyError, IndexError, TypeError):
         return "OK", 200
 
-    # Deduplicate
     if ProcessedMessage.query.filter_by(message_id=message_id).first():
         return "OK", 200
     db.session.add(ProcessedMessage(message_id=message_id))
@@ -575,12 +567,12 @@ def webhook():
 
     if not user or not user.oauth_token:
         send_whatsapp(
-        phone,
-        f"Welcome to Jekyll — your text-to-calendar assistant!\n\n"
-        f"To get started, connect your Google Calendar here: {BASE_URL}/auth/{phone}\n\n"
-        f"Once you’re set up, just text me what you’d like to add to your calendar.\n\n"
-        f"Examples: \"Dentist Friday at 3pm\", \"Food at noon for 45 mins at Chipotle\"\n\n"
-        f"For detailed instructions on how to use this, click here: https://your-link-here"
+            phone,
+            f"Welcome to Jekyll — your text-to-calendar assistant!\n\n"
+            f"To get started, connect your Google Calendar here: {BASE_URL}/auth/{phone}\n\n"
+            f"Once you’re set up, just text me what you’d like to add to your calendar.\n\n"
+            f"Examples: \"Dentist Friday at 3pm\", \"Food at noon for 45 mins at Chipotle\"\n\n"
+            f"For detailed instructions on how to use this, click here: https://your-link-here"
     )
     return "OK", 200
 
