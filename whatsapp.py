@@ -117,7 +117,6 @@ def parse_event(message, intent, last_event=None):
     in_30m = (now + timedelta(minutes=30)).strftime("%H:%M")
     last_event_context = f"\nLast event discussed: {json.dumps(last_event)}" if last_event else ""
 
-    # Pre-fill date hint based on intent so Gemini doesn't have to guess
     if intent == "CREATE_TODAY":
         date_hint = f"The event is TODAY ({today}). Use this as the date."
     elif intent == "CREATE_TOMORROW":
@@ -164,16 +163,6 @@ TIME:
 
 DURATION:
 - Explicit value always wins
-- "quick" → 30, "long" → 120
-- coffee / chat / standup → 30
-- lunch / dinner / brunch / drinks → 75
-- doctor / dentist / checkup / therapy → 60
-- gym / workout / run / yoga / hike → 60
-- class / lecture / lab → 90
-- meeting / sync / call / 1:1 → 45
-- interview → 60
-- haircut / barber → 45
-- movie → 120
 - default → 60
 
 LOCATION:
@@ -245,34 +234,39 @@ def get_calendar_service(user):
 
 def handle_create(user, text, phone, intent):
     event_data = parse_event(text, intent, last_event=user.last_event)
+
+    if not event_data.get("title"):
+        send_whatsapp(phone, "What's the event?")
+        return
+    
     if not event_data.get("date") or not event_data.get("time"):
-        send_whatsapp(phone, "What date and time? 🗓️")
+        send_whatsapp(phone, "What date and time?")
         return
-
-    if event_data.get("confidence") == "low":
-        user.last_event = event_data
-        db.session.commit()
-        location_str = f" at {event_data['location']}" if event_data.get("location") else ""
-        send_whatsapp(phone, f"Just to confirm — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}? Reply 'yes' to add it.")
+    
+    if user.last_event:
+        send_whatsapp(
+            phone,
+            f"You still have an event pending confirmation: *{user.last_event['title']}* on {user.last_event['date']}.\n\n"
+            f"Reply *Yes* to confirm, or *Skip* to discard and add the new one."
+        )
         return
-
-    service = get_calendar_service(user)
-    start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
-    end = start + timedelta(minutes=event_data.get("duration_minutes") or 60)
-    event = {
-        "summary": event_data["title"],
-        "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
-        "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
-    }
-    if event_data.get("location"):
-        event["location"] = event_data["location"]
-    service.events().insert(calendarId="primary", body=event).execute()
-
+    
     user.last_event = event_data
     db.session.commit()
+    
+    duration = event_data.get("duration_minutes") or 60
+    duration_line = f"{duration} min (default)" if not event_data.get("duration_minutes") else f"{duration} min"
+    location_line = f"\n{event_data['location']}" if event_data.get("location") else ""
 
-    location_str = f" at {event_data['location']}" if event_data.get("location") else ""
-    send_whatsapp(phone, f"Done ✅ {event_data['title']}{location_str} — {event_data['date']} at {event_data['time']}")
+    send_whatsapp(
+        phone,
+        f"Here's what I'll add:\n\n"
+        f"*{event_data['title']}*\n"
+        f"{event_data['date']} at {event_data['time']}\n"
+        f"{duration_line}"
+        f"{location_line}\n\n"
+        f"Reply *Yes* to confirm, or send a correction."
+    )
 
 
 def handle_confirm(user, phone):
