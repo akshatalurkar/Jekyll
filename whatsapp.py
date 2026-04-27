@@ -573,8 +573,8 @@ def webhook():
             f"Once you’re set up, just text me what you’d like to add to your calendar.\n\n"
             f"Examples: \"Dentist Friday at 3pm\", \"Food at noon for 45 mins at Chipotle\"\n\n"
             f"For detailed instructions on how to use this, click here: https://your-link-here"
-    )
-    return "OK", 200
+        )
+        return "OK", 200
 
     try:
         intent = classify_intent(text)
