@@ -573,8 +573,8 @@ def webhook():
 
     user = User.query.filter_by(phone=phone).first()
 
-   if not user or not user.oauth_token:
-    send_whatsapp(
+    if not user or not user.oauth_token:
+        send_whatsapp(
         phone,
         f"Welcome to Jekyll — your text-to-calendar assistant!\n\n"
         f"To get started, connect your Google Calendar here: {BASE_URL}/auth/{phone}\n\n"
