@@ -25,11 +25,20 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(16))
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 db = SQLAlchemy(app)
 
+
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     phone = db.Column(db.String(20), unique=True, nullable=False)
     oauth_token = db.Column(db.Text, nullable=True)
     refresh_token = db.Column(db.Text, nullable=True)
+    last_event = db.Column(db.JSON, nullable=True)
+
+
+class ProcessedMessage(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    message_id = db.Column(db.String(255), unique=True, nullable=False)
+    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+
 
 with app.app_context():
     db.create_all()
@@ -37,36 +46,56 @@ with app.app_context():
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 
+
 # ── Gemini helpers ──────────────────────────────────────────
 
 def classify_intent(message):
-    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Classify the user's intent.
+    now = datetime.now(ZoneInfo("America/Los_Angeles"))
+    today = now.strftime("%Y-%m-%d")
+    current_time = now.strftime("%H:%M")
 
-Current date: {datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%Y-%m-%d")}
-Current time: {datetime.now(ZoneInfo("America/Los_Angeles")).strftime("%H:%M")} PT
+    prompt = f"""You are Jekyll, a WhatsApp calendar assistant. Classify the user's message into exactly one category.
 
-Return ONLY one word — no punctuation, no explanation.
+Current date: {today}
+Current time: {current_time} PT
+
+Return ONLY the category word. No punctuation, no explanation.
 
 CATEGORIES:
-CREATE - adding any new event, appointment, reminder, or block
-RECURRING - adding a repeating or regular event (contains: "every", "weekly", "daily", "each", "every week")
+GREETING - hello, hi, hey, what's up, how are you, who are you, what can you do
+CREATE_TODAY - adding an event that happens today
+CREATE_TOMORROW - adding an event that happens tomorrow
+CREATE_RELATIVE - adding an event in X hours or X minutes from now
+CREATE_SPECIFIC - adding an event on a specific future date or day of the week
 DELETE - canceling, removing, or deleting an existing event
-LIST - asking what's on the calendar, what's coming up, any upcoming events
-CONFIRM - user is confirming a previous action with "yes", "yep", "yeah", "confirm", "correct", "sure", "ok"
-UNKNOWN - greetings, thanks, gibberish, unrelated
+LIST_TODAY - asking what's on the calendar today
+LIST_TOMORROW - asking what's on the calendar tomorrow
+LIST_WEEK - asking what's coming up this week or in the next few days
+CONFIRM - confirming a pending action: "yes", "yep", "yeah", "correct", "sure", "ok", "do it"
+UNKNOWN - anything else
 
 EXAMPLES:
-"dentist Friday 3pm" → CREATE
-"coffee with maya tmrw morning" → CREATE
-"block off sunday afternoon" → CREATE
-"gym every tuesday 7am" → RECURRING
-"weekly sync mondays at 10" → RECURRING
-"cancel my dentist appt" → DELETE
-"remove the thing friday" → DELETE
-"what do i have this week" → LIST
-"anything tomorrow?" → LIST
+"hi" → GREETING
+"hey what's up" → GREETING
+"what can you do" → GREETING
+"dentist today at 3pm" → CREATE_TODAY
+"lunch at noon" → CREATE_TODAY
+"coffee tmrw morning" → CREATE_TOMORROW
+"dentist tomorrow 2pm" → CREATE_TOMORROW
+"meeting in 2 hours" → CREATE_RELATIVE
+"call in 30 mins" → CREATE_RELATIVE
+"dentist friday 3pm" → CREATE_SPECIFIC
+"coffee with jake next monday" → CREATE_SPECIFIC
+"cancel my dentist" → DELETE
+"remove the 3pm" → DELETE
+"what do i have today" → LIST_TODAY
+"anything today?" → LIST_TODAY
+"what's tomorrow look like" → LIST_TOMORROW
+"anything tomorrow?" → LIST_TOMORROW
+"what do i have this week" → LIST_WEEK
+"what's coming up" → LIST_WEEK
 "yes" → CONFIRM
-"yeah that's right" → CONFIRM
+"yeah do it" → CONFIRM
 "thanks" → UNKNOWN
 "lol" → UNKNOWN
 
@@ -78,7 +107,7 @@ Message: "{message}" """
     return response.text.strip().upper()
 
 
-def parse_event(message, last_event=None):
+def parse_event(message, intent, last_event=None):
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
     today = now.strftime("%Y-%m-%d")
     today_display = now.strftime("%A, %B %d, %Y")
@@ -88,19 +117,25 @@ def parse_event(message, last_event=None):
     in_30m = (now + timedelta(minutes=30)).strftime("%H:%M")
     last_event_context = f"\nLast event discussed: {json.dumps(last_event)}" if last_event else ""
 
-    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Parse the user's message into a calendar event.
+    # Pre-fill date hint based on intent so Gemini doesn't have to guess
+    if intent == "CREATE_TODAY":
+        date_hint = f"The event is TODAY ({today}). Use this as the date."
+    elif intent == "CREATE_TOMORROW":
+        date_hint = f"The event is TOMORROW ({tomorrow}). Use this as the date."
+    elif intent == "CREATE_RELATIVE":
+        date_hint = f"The event is relative to NOW ({current_time} today {today}). Calculate the exact time."
+    else:
+        date_hint = "Resolve the date from the message using the current date as reference."
+
+    prompt = f"""You are Jekyll, a WhatsApp calendar assistant. Parse this message into a calendar event.
 
 Current date: {today} ({today_display})
-Current time: {current_time} (Pacific Time){last_event_context}
+Current time: {current_time} (Pacific Time)
+{date_hint}{last_event_context}
 
-If the message seems to modify or reference a previous event, use that context to fill in missing fields.
 Be robust to typos, abbreviations, missing punctuation, all lowercase, all caps.
-Examples of messy input to handle:
-- "dntst fri 3p" → Dentist, Friday, 15:00
-- "gym tmrw mornin" → Gym, tomorrow, 09:00
-- "mtg w/ jake mon 2" → Meeting with Jake, Monday, 14:00
-
-If a field is ambiguous, make your best inference from context. Only return null if there is truly no information to work with.
+If a field is ambiguous, make your best inference. Only return null if there is truly no information.
+If the message references a previous event, use that context to fill missing fields.
 
 Return ONLY a valid JSON object. No explanations, comments, markdown, or text outside the JSON.
 
@@ -115,55 +150,41 @@ OUTPUT SCHEMA:
 }}
 
 TITLE:
-- Clean, concise, properly capitalized
+- Clean, properly capitalized
 - Preserve context ("Coffee with Maya", not "Coffee")
-- Strip leading filler: "let's", "gonna", "need to", "i need to", "remember to", "don't forget to", "gotta", "have to", "want to"
-
-DATE:
-- "today" → {today}
-- "tmrw" / "tomorrow" → {tomorrow}
-- "next [weekday]" → upcoming occurrence, NEVER today
-- "this [weekday]" → upcoming or same-day occurrence
-- Bare weekday ("Monday", "Fri") → nearest future occurrence, not today
-- "in N days" → today + N
-- No date mentioned → null
+- Strip filler: "let's", "gonna", "need to", "gotta", "have to", "want to", "remember to"
 
 TIME:
 - "morning" → 09:00, "afternoon" → 14:00, "evening" → 18:00, "night" → 20:00, "noon" → 12:00, "eod" → 17:00
 - "in 2 hours" → {in_2h}, "in 30 mins" → {in_30m} (round to nearest 5 min)
-- Ambiguous bare number ("at 8", "at 7") — resolve by event type:
+- Ambiguous number ("at 8", "at 7") → resolve by type:
   - gym, run, yoga, breakfast, standup → AM
   - dinner, drinks, bar, party, movie → PM
   - meeting, call, sync, lunch → ≤7 assume PM, 8-11 assume AM, 12 = noon
-- No time mentioned → null
 
 DURATION:
-- Use explicit value if stated
-- "quick" → 30, "long" / "extended" → 120
+- Explicit value always wins
+- "quick" → 30, "long" → 120
 - coffee / chat / standup → 30
 - lunch / dinner / brunch / drinks → 75
 - doctor / dentist / checkup / therapy → 60
 - gym / workout / run / yoga / hike → 60
-- class / lecture / lab / workshop → 90
+- class / lecture / lab → 90
 - meeting / sync / call / 1:1 → 45
 - interview → 60
-- haircut / barber / salon → 45
+- haircut / barber → 45
 - movie → 120
-- unknown type → 60
+- default → 60
 
 LOCATION:
-- Only if explicitly mentioned (venue, address, "Zoom", "Google Meet")
-- Never infer or hallucinate
-- No mention → null
+- Only if explicitly mentioned
+- Never infer
+- null if not mentioned
 
 CONFIDENCE:
-- "high" → date, time, title all clearly stated
-- "medium" → one field inferred or ambiguous
-- "low" → multiple fields inferred, message is vague or very short
-
-EXAMPLE:
-"yo quick coffee with priya tmrw morning at blue bottle" →
-{{"title": "Coffee with Priya", "date": "{tomorrow}", "time": "09:00", "duration_minutes": 30, "location": "Blue Bottle", "confidence": "high"}}
+- "high" → title, date, time all clear
+- "medium" → one field inferred
+- "low" → multiple fields inferred or message is very vague
 
 Message: "{message}" """
     response = client.models.generate_content(
@@ -178,8 +199,9 @@ def parse_delete(message):
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
     today = now.strftime("%Y-%m-%d")
     today_display = now.strftime("%A, %B %d, %Y")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
 
-    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Extract the event the user wants to delete.
+    prompt = f"""You are Jekyll, a WhatsApp calendar assistant. Extract what the user wants to delete.
 
 Current date: {today} ({today_display})
 
@@ -191,17 +213,11 @@ OUTPUT SCHEMA:
   "date": "YYYY-MM-DD" | null
 }}
 
-TITLE:
-- Short and searchable — use core keyword(s) only, lowercase
-- Examples: "dentist", "coffee with jake", "team sync", "3pm meeting"
-
-DATE:
-- Resolve relative references using today's date
-- No date mentioned → null
+TITLE: Short, searchable, lowercase keyword(s) only.
 
 EXAMPLES:
 "cancel my dentist friday" → {{"title": "dentist", "date": null}}
-"remove the team sync tomorrow" → {{"title": "team sync", "date": null}}
+"remove the team sync tomorrow" → {{"title": "team sync", "date": "{tomorrow}"}}
 "delete my 3pm today" → {{"title": "3pm", "date": "{today}"}}
 "get rid of coffee with jake" → {{"title": "coffee with jake", "date": null}}
 
@@ -213,64 +229,6 @@ Message: "{message}" """
     raw = response.text.strip().replace("```json", "").replace("```", "")
     return json.loads(raw)
 
-
-def parse_recurring(message):
-    now = datetime.now(ZoneInfo("America/Los_Angeles"))
-    today = now.strftime("%Y-%m-%d")
-    today_display = now.strftime("%A, %B %d, %Y")
-    current_time = now.strftime("%H:%M")
-
-    prompt = f"""You are Jekyll, a WhatsApp-based calendar assistant. Parse a recurring event.
-
-Current date: {today} ({today_display})
-Current time: {current_time} (Pacific Time)
-
-Return ONLY a valid JSON object. No explanations, comments, or markdown.
-
-OUTPUT SCHEMA:
-{{
-  "title": string,
-  "time": "HH:MM" | null,
-  "duration_minutes": integer | null,
-  "recurrence": "DAILY" | "WEEKLY" | "MONTHLY",
-  "day_of_week": "MO" | "TU" | "WE" | "TH" | "FR" | "SA" | "SU" | null
-}}
-
-TITLE:
-- Clean, concise, properly capitalized
-- Strip leading filler words
-
-TIME:
-- "morning" → 09:00, "afternoon" → 14:00, "evening" → 18:00, "night" → 20:00, "noon" → 12:00
-- Ambiguous bare number → resolve by event type
-- No time → null
-
-RECURRENCE:
-- "every day" / "daily" → DAILY, day_of_week = null
-- "every [weekday]" / "weekly on [weekday]" → WEEKLY + set day_of_week
-- "every week" with no day → WEEKLY, day_of_week = null
-- "every month" / "monthly" → MONTHLY, day_of_week = null
-
-DURATION:
-- "quick" → 30, "long" → 120
-- standup / scrum → 30
-- gym / workout / run / yoga → 60
-- class / lecture → 90
-- meeting / sync → 45
-- default → 60
-
-EXAMPLES:
-"gym every tuesday 7am" → {{"title": "Gym", "time": "07:00", "duration_minutes": 60, "recurrence": "WEEKLY", "day_of_week": "TU"}}
-"daily standup at 9" → {{"title": "Standup", "time": "09:00", "duration_minutes": 30, "recurrence": "DAILY", "day_of_week": null}}
-"weekly sync mondays at 10am for 30 mins" → {{"title": "Weekly Sync", "time": "10:00", "duration_minutes": 30, "recurrence": "WEEKLY", "day_of_week": "MO"}}
-
-Message: "{message}" """
-    response = client.models.generate_content(
-        model="gemini-2.5-flash",
-        contents=prompt
-    )
-    raw = response.text.strip().replace("```json", "").replace("```", "")
-    return json.loads(raw)
 
 # ── Google Calendar helpers ─────────────────────────────────
 
@@ -284,17 +242,18 @@ def get_calendar_service(user):
     )
     return build("calendar", "v3", credentials=creds)
 
-def handle_create(user, text, phone):
-    event_data = parse_event(text, last_event=user.last_event)
+
+def handle_create(user, text, phone, intent):
+    event_data = parse_event(text, intent, last_event=user.last_event)
     if not event_data.get("date") or not event_data.get("time"):
-        send_whatsapp(phone, "I couldn't figure out the date or time — can you be more specific?")
+        send_whatsapp(phone, "What date and time? 🗓️")
         return
 
     if event_data.get("confidence") == "low":
         user.last_event = event_data
         db.session.commit()
         location_str = f" at {event_data['location']}" if event_data.get("location") else ""
-        send_whatsapp(phone, f"Just to confirm — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}? Reply 'yes' to confirm or correct me.")
+        send_whatsapp(phone, f"Just to confirm — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}? Reply 'yes' to add it.")
         return
 
     service = get_calendar_service(user)
@@ -315,11 +274,15 @@ def handle_create(user, text, phone):
     location_str = f" at {event_data['location']}" if event_data.get("location") else ""
     send_whatsapp(phone, f"Done ✅ {event_data['title']}{location_str} — {event_data['date']} at {event_data['time']}")
 
+
 def handle_confirm(user, phone):
     if not user.last_event:
-        send_whatsapp(phone, "Nothing to confirm — what would you like to add?")
+        send_whatsapp(phone, "Nothing pending — what would you like to add?")
         return
     event_data = user.last_event
+    if not event_data.get("date") or not event_data.get("time"):
+        send_whatsapp(phone, "What date and time? 🗓️")
+        return
     service = get_calendar_service(user)
     start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
     end = start + timedelta(minutes=event_data.get("duration_minutes") or 60)
@@ -336,6 +299,7 @@ def handle_confirm(user, phone):
     location_str = f" at {event_data['location']}" if event_data.get("location") else ""
     send_whatsapp(phone, f"Done ✅ {event_data['title']}{location_str} — {event_data['date']} at {event_data['time']}")
 
+
 def handle_delete(user, text, phone):
     delete_data = parse_delete(text)
     title = delete_data.get("title", "").lower()
@@ -351,50 +315,50 @@ def handle_delete(user, text, phone):
     events = events_result.get("items", [])
     match = next((e for e in events if title in e.get("summary", "").lower()), None)
     if not match:
-        send_whatsapp(phone, f"I couldn't find an upcoming event matching '{delete_data['title']}'.")
+        send_whatsapp(phone, f"Couldn't find '{delete_data['title']}' coming up.")
         return
     service.events().delete(calendarId="primary", eventId=match["id"]).execute()
-    send_whatsapp(phone, f"🗑️ Deleted: {match['summary']}")
+    send_whatsapp(phone, f"Removed {match['summary']} 🗑️")
 
-def handle_list(user, phone):
+
+def handle_list(user, phone, intent):
+    now = datetime.now(ZoneInfo("America/Los_Angeles"))
     service = get_calendar_service(user)
-    now = datetime.utcnow().isoformat() + "Z"
+
+    if intent == "LIST_TODAY":
+        time_min = now.replace(hour=0, minute=0, second=0).isoformat()
+        time_max = now.replace(hour=23, minute=59, second=59).isoformat()
+        label = "today"
+    elif intent == "LIST_TOMORROW":
+        tomorrow = now + timedelta(days=1)
+        time_min = tomorrow.replace(hour=0, minute=0, second=0).isoformat()
+        time_max = tomorrow.replace(hour=23, minute=59, second=59).isoformat()
+        label = "tomorrow"
+    else:
+        time_min = now.isoformat()
+        time_max = (now + timedelta(days=7)).isoformat()
+        label = "this week"
+
     events_result = service.events().list(
         calendarId="primary",
-        timeMin=now,
+        timeMin=time_min,
+        timeMax=time_max,
         maxResults=5,
         singleEvents=True,
         orderBy="startTime"
     ).execute()
     events = events_result.get("items", [])
+
     if not events:
-        send_whatsapp(phone, "You have no upcoming events.")
+        send_whatsapp(phone, f"Nothing on the calendar {label}.")
         return
-    lines = ["📅 Your next events:"]
+
+    lines = [f"Here's {label} 📅"]
     for e in events:
         start = e["start"].get("dateTime", e["start"].get("date"))
-        dt = datetime.fromisoformat(start.replace("Z", "+00:00"))
+        dt = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
         lines.append(f"• {e['summary']} — {dt.strftime('%a %b %d at %I:%M %p')}")
     send_whatsapp(phone, "\n".join(lines))
-
-def handle_create(user, text, phone):
-    event_data = parse_event(text)
-    if not event_data.get("date") or not event_data.get("time"):
-        send_whatsapp(phone, "I couldn't figure out the date or time — can you be more specific?")
-        return
-    service = get_calendar_service(user)
-    start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
-    end = start + timedelta(minutes=event_data.get("duration_minutes") or 60)
-    event = {
-        "summary": event_data["title"],
-        "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
-        "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
-    }
-    if event_data.get("location"):
-        event["location"] = event_data["location"]
-    service.events().insert(calendarId="primary", body=event).execute()
-    location_str = f" at {event_data['location']}" if event_data.get("location") else ""
-    send_whatsapp(phone, f"Done ✅ {event_data['title']}{location_str} — {event_data['date']} at {event_data['time']}")
 
 
 # ── WhatsApp ────────────────────────────────────────────────
@@ -415,6 +379,7 @@ def send_whatsapp(to, text):
     )
     return response.json()
 
+
 # ── Routes ──────────────────────────────────────────────────
 
 AUTH_PAGE = """<!DOCTYPE html>
@@ -430,7 +395,6 @@ AUTH_PAGE = """<!DOCTYPE html>
   .bg-grid { position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px); background-size: 48px 48px; pointer-events: none; }
   .bg-glow { position: fixed; width: 560px; height: 560px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.13) 0%, rgba(37,211,102,0.04) 45%, transparent 70%); top: -150px; right: -100px; pointer-events: none; }
   .bg-glow-2 { position: fixed; width: 480px; height: 480px; border-radius: 50%; background: radial-gradient(circle, rgba(18,140,65,0.11) 0%, rgba(18,140,65,0.04) 45%, transparent 70%); bottom: -120px; left: -100px; pointer-events: none; }
-  .bg-glow-3 { position: fixed; width: 200px; height: 200px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.07) 0%, transparent 70%); top: 40%; left: 10%; pointer-events: none; }
   .card { position: relative; width: 100%; max-width: 420px; background: #12151a; border: 0.5px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 3rem 2.5rem; animation: fadeUp 0.6s cubic-bezier(0.22,1,0.36,1) both; }
   @keyframes fadeUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
   .logo-row { display: flex; align-items: center; gap: 10px; margin-bottom: 2.5rem; }
@@ -445,7 +409,6 @@ AUTH_PAGE = """<!DOCTYPE html>
   @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
   .connect-btn { display: flex; align-items: center; justify-content: center; gap: 12px; width: 100%; padding: 14px 20px; background: #e8e4de; color: #0b0d10; border: none; border-radius: 12px; font-family: 'DM Sans', sans-serif; font-size: 15px; font-weight: 500; cursor: pointer; text-decoration: none; transition: background 0.2s, transform 0.15s; }
   .connect-btn:hover { background: #ffffff; transform: translateY(-1px); }
-  .connect-btn:active { transform: scale(0.99); }
   .steps { margin-top: 2rem; display: flex; flex-direction: column; gap: 12px; }
   .step { display: flex; align-items: flex-start; gap: 12px; }
   .step-num { width: 22px; height: 22px; border-radius: 50%; border: 0.5px solid rgba(37,211,102,0.2); display: flex; align-items: center; justify-content: center; font-size: 11px; color: rgba(37,211,102,0.45); flex-shrink: 0; margin-top: 1px; font-family: 'Syne', sans-serif; }
@@ -457,7 +420,6 @@ AUTH_PAGE = """<!DOCTYPE html>
   <div class="bg-grid"></div>
   <div class="bg-glow"></div>
   <div class="bg-glow-2"></div>
-  <div class="bg-glow-3"></div>
   <div class="card">
     <div class="logo-row">
       <div class="logo-icon">
@@ -509,8 +471,6 @@ SUCCESS_PAGE = """<!DOCTYPE html>
   body { min-height: 100vh; background: #0b0d10; font-family: 'DM Sans', sans-serif; color: #e8e4de; display: flex; align-items: center; justify-content: center; padding: 2rem 1.5rem; position: relative; overflow-y: auto; }
   .bg-grid { position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px); background-size: 48px 48px; pointer-events: none; }
   .bg-glow { position: fixed; width: 560px; height: 560px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.18) 0%, rgba(37,211,102,0.06) 45%, transparent 70%); top: -150px; right: -100px; pointer-events: none; }
-  .bg-glow-2 { position: fixed; width: 480px; height: 480px; border-radius: 50%; background: radial-gradient(circle, rgba(18,140,65,0.14) 0%, rgba(18,140,65,0.04) 45%, transparent 70%); bottom: -120px; left: -100px; pointer-events: none; }
-  .bg-glow-3 { position: fixed; width: 200px; height: 200px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.08) 0%, transparent 70%); top: 40%; left: 10%; pointer-events: none; }
   .card { position: relative; width: 100%; max-width: 420px; background: #12151a; border: 0.5px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 3rem 2.5rem; animation: fadeUp 0.6s cubic-bezier(0.22,1,0.36,1) both; text-align: center; }
   @keyframes fadeUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
   .check-ring { width: 72px; height: 72px; border-radius: 50%; background: rgba(37,211,102,0.1); border: 0.5px solid rgba(37,211,102,0.3); display: flex; align-items: center; justify-content: center; margin: 0 auto 2rem; animation: popIn 0.5s cubic-bezier(0.34,1.56,0.64,1) 0.3s both; }
@@ -524,19 +484,13 @@ SUCCESS_PAGE = """<!DOCTYPE html>
   .divider { height: 0.5px; background: rgba(255,255,255,0.07); margin-bottom: 2rem; }
   .examples-label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: rgba(232,228,222,0.25); margin-bottom: 1rem; font-family: 'Syne', sans-serif; }
   .bubbles { display: flex; flex-direction: column; gap: 8px; text-align: left; }
-  .bubble { background: rgba(37,211,102,0.06); border: 0.5px solid rgba(37,211,102,0.15); border-radius: 12px 12px 12px 3px; padding: 10px 14px; font-size: 13px; color: rgba(232,228,222,0.7); animation: slideIn 0.4s cubic-bezier(0.22,1,0.36,1) both; }
-  .bubble:nth-child(1) { animation-delay: 0.6s; }
-  .bubble:nth-child(2) { animation-delay: 0.75s; }
-  .bubble:nth-child(3) { animation-delay: 0.9s; }
-  @keyframes slideIn { from { opacity: 0; transform: translateX(-10px); } to { opacity: 1; transform: translateX(0); } }
+  .bubble { background: rgba(37,211,102,0.06); border: 0.5px solid rgba(37,211,102,0.15); border-radius: 12px 12px 12px 3px; padding: 10px 14px; font-size: 13px; color: rgba(232,228,222,0.7); }
   .close-note { margin-top: 2rem; font-size: 12px; color: rgba(232,228,222,0.2); line-height: 1.6; }
 </style>
 </head>
 <body>
   <div class="bg-grid"></div>
   <div class="bg-glow"></div>
-  <div class="bg-glow-2"></div>
-  <div class="bg-glow-3"></div>
   <div class="card">
     <div class="logo-row">
       <div class="logo-icon">
@@ -561,13 +515,14 @@ SUCCESS_PAGE = """<!DOCTYPE html>
     <p class="examples-label">Try saying</p>
     <div class="bubbles">
       <div class="bubble">dentist appointment Friday at 3pm</div>
-      <div class="bubble">every Monday gym at 7am</div>
-      <div class="bubble">what do I have this week?</div>
+      <div class="bubble">what do I have today?</div>
+      <div class="bubble">cancel my 3pm tomorrow</div>
     </div>
     <p class="close-note">You can close this tab and return to WhatsApp.</p>
   </div>
 </body>
 </html>"""
+
 
 @app.route("/auth/<phone>")
 def auth(phone):
@@ -592,6 +547,7 @@ def auth(phone):
     session["code_verifier"] = code_verifier
     return render_template_string(AUTH_PAGE, phone=phone, auth_url=auth_url)
 
+
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
@@ -612,34 +568,49 @@ def webhook():
         if not phone.startswith("+"):
             phone = "+" + phone
         text = message["text"]["body"]
+        message_id = message["id"]
     except (KeyError, IndexError, TypeError):
         return "OK", 200
+
+    # Deduplicate
+    if ProcessedMessage.query.filter_by(message_id=message_id).first():
+        return "OK", 200
+    db.session.add(ProcessedMessage(message_id=message_id))
+    db.session.commit()
 
     user = User.query.filter_by(phone=phone).first()
 
     if not user or not user.oauth_token:
-        send_whatsapp(phone, f"👋 Welcome to Jekyll — your text-to-calendar assistant!\n\nTo get started, connect your Google Calendar by clicking this link:\n{BASE_URL}/auth/{phone}\n\nOnce connected, just text me anything you want to add to your calendar. Example: 'dentist Friday at 3pm'")
+        send_whatsapp(phone, f"👋 Welcome to Jekyll — your text-to-calendar assistant!\n\nTo get started, connect your Google Calendar:\n{BASE_URL}/auth/{phone}\n\nOnce connected, just text me anything you want to add. Example: 'dentist Friday at 3pm'")
         return "OK", 200
 
     try:
         intent = classify_intent(text)
-        if intent == "CREATE":
-            handle_create(user, text, phone)
+
+        if intent == "GREETING":
+            send_whatsapp(phone, "Hey! 👋 What would you like to schedule?")
+
+        elif intent in ("CREATE_TODAY", "CREATE_TOMORROW", "CREATE_RELATIVE", "CREATE_SPECIFIC"):
+            handle_create(user, text, phone, intent)
+
         elif intent == "CONFIRM":
             handle_confirm(user, phone)
+
         elif intent == "DELETE":
             handle_delete(user, text, phone)
-        elif intent == "LIST":
-            handle_list(user, phone)
-        elif intent == "RECURRING":
-            handle_recurring(user, text, phone)
+
+        elif intent in ("LIST_TODAY", "LIST_TOMORROW", "LIST_WEEK"):
+            handle_list(user, phone, intent)
+
         else:
-            send_whatsapp(phone, "Hmm, not sure what to do with that. Try something like:\n• 'dentist Friday 3pm'\n• 'gym every tuesday 7am'\n• 'cancel my dentist'\n• 'what's on my calendar?'")
+            send_whatsapp(phone, "Not sure what you mean. Try:\n• 'dentist Friday 3pm'\n• 'what's on today?'\n• 'cancel my dentist'")
+
     except Exception as e:
         print(f"Error: {e}")
-        send_whatsapp(phone, "Something went wrong — please try again in a moment.")
+        send_whatsapp(phone, "Something went wrong — try again in a moment.")
 
     return "OK", 200
+
 
 @app.route("/oauth/callback")
 def oauth_callback():
@@ -664,6 +635,7 @@ def oauth_callback():
     user.refresh_token = token.get("refresh_token")
     db.session.commit()
     return render_template_string(SUCCESS_PAGE)
+
 
 if __name__ == "__main__":
     app.run(port=int(os.getenv("PORT", 8001)))
