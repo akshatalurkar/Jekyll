@@ -5,7 +5,7 @@ import hashlib
 import base64
 import requests
 from datetime import date, datetime, timedelta
-from flask import Flask, request, session, render_template_string
+from flask import Flask, request, session, render_template
 from dotenv import load_dotenv
 from flask_sqlalchemy import SQLAlchemy
 from google import genai
@@ -231,6 +231,24 @@ def get_calendar_service(user):
     )
     return build("calendar", "v3", credentials=creds)
 
+def check_conflict(service, new_event):
+    start = datetime.strptime(
+        f"{new_event['date']} {new_event['time']}",
+        "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+
+    end = start + timedelta(minutes=new_event.get("duration_minutes") or 60)
+
+    events_result = service.events().list(
+        calendarId="primary",
+        timeMin=(start - timedelta(hours=1)).isoformat(),
+        timeMax=(end + timedelta(hours=1)).isoformat(),
+        singleEvents=True,
+        orderBy="startTime"
+    ).execute()
+
+    events = events_result.get("items", [])
+    return events
 
 def handle_create(user, text, phone, intent):
     event_data = parse_event(text, intent, last_event=user.last_event)
@@ -243,6 +261,36 @@ def handle_create(user, text, phone, intent):
         send_whatsapp(phone, "Got it — what date and time should I set this for?")
         return
     
+    service = get_calendar_service(user)
+    conflicts = check_conflict(service, event_data)
+
+    if conflicts:
+        existing = conflicts[0]
+
+        existing_start = existing["start"].get("dateTime", existing["start"].get("date"))
+
+        dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
+
+        existing_time = dt.strftime("%a %b %d at %I:%M %p")
+
+        user.last_event = {
+            "new_event": event_data,
+            "conflict_event": {
+                "title": existing["summary"],
+                "time": existing_time
+            },
+            "needs_double_confirm": True
+        }
+        db.session.commit()
+
+        send_whatsapp(
+            phone,
+            f"You already have {existing['summary']} scheduled for {existing_time}.\n\n"
+            f"Do you still want to add {event_data['title']} on {event_data['date']} at {event_data['time']}?\n\n"
+            f"Reply *Yes* to confirm, or send a correction."
+        )
+        return        
+
     user.last_event = event_data
     db.session.commit()
     
@@ -266,6 +314,11 @@ def handle_confirm(user, phone):
         send_whatsapp(phone, "Nothing pending — what would you like to add?")
         return
     event_data = user.last_event
+
+# Handle double booking case
+    if isinstance(event_data, dict) and event_data.get("needs_double_confirm"):
+        event_data = event_data["new_event"]
+
     if not event_data.get("date") or not event_data.get("time"):
         send_whatsapp(phone, "What date and time? 🗓️")
         return
@@ -283,7 +336,7 @@ def handle_confirm(user, phone):
     user.last_event = None
     db.session.commit()
     location_str = f" at {event_data['location']}" if event_data.get("location") else ""
-    send_whatsapp(phone, f"Done ✅ {event_data['title']}{location_str} — {event_data['date']} at {event_data['time']}")
+    send_whatsapp(phone, f"Added - {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}")
 
 
 def handle_delete(user, text, phone):
@@ -304,7 +357,7 @@ def handle_delete(user, text, phone):
         send_whatsapp(phone, f"Couldn't find '{delete_data['title']}' coming up.")
         return
     service.events().delete(calendarId="primary", eventId=match["id"]).execute()
-    send_whatsapp(phone, f"Removed {match['summary']} 🗑️")
+    send_whatsapp(phone, f"Removed {match['summary']} ")
 
 
 def handle_list(user, phone, intent):
@@ -339,7 +392,7 @@ def handle_list(user, phone, intent):
         send_whatsapp(phone, f"Nothing on the calendar {label}.")
         return
 
-    lines = [f"Here's {label} 📅"]
+    lines = [f"Here's {label} on your calendar:"]
     for e in events:
         start = e["start"].get("dateTime", e["start"].get("date"))
         dt = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
@@ -390,7 +443,7 @@ def auth(phone):
     session["state"] = state
     session["phone"] = phone
     session["code_verifier"] = code_verifier
-    return render_template_string(AUTH_PAGE, phone=phone, auth_url=auth_url)
+    return render_template("auth.html", phone=phone, auth_url=auth_url)
 
 
 @app.route("/webhook", methods=["GET", "POST"])
@@ -439,7 +492,7 @@ def webhook():
         intent = classify_intent(text)
 
         if intent == "GREETING":
-            send_whatsapp(phone, "Hey! 👋 What would you like to schedule?")
+            send_whatsapp(phone, "Hey! What would you like to schedule?")
 
         elif intent in ("CREATE_TODAY", "CREATE_TOMORROW", "CREATE_RELATIVE", "CREATE_SPECIFIC"):
             handle_create(user, text, phone, intent)
@@ -485,7 +538,7 @@ def oauth_callback():
     user.oauth_token = token["access_token"]
     user.refresh_token = token.get("refresh_token")
     db.session.commit()
-    return render_template_string(SUCCESS_PAGE)
+    return render_template("success.html")
 
 
 if __name__ == "__main__":
