@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Jekyll — Connect Calendar</title>
+<link href="https://fonts.googleapis.com/css2?family=Syne:wght@400;600;700&family=DM+Sans:wght@300;400;500&display=swap" rel="stylesheet">
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+  body { min-height: 100vh; background: #0b0d10; font-family: 'DM Sans', sans-serif; color: #e8e4de; display: flex; align-items: center; justify-content: center; padding: 2rem 1.5rem; position: relative; overflow-y: auto; }
+  .bg-grid { position: fixed; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.025) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.025) 1px, transparent 1px); background-size: 48px 48px; pointer-events: none; }
+  .bg-glow { position: fixed; width: 560px; height: 560px; border-radius: 50%; background: radial-gradient(circle, rgba(37,211,102,0.13) 0%, rgba(37,211,102,0.04) 45%, transparent 70%); top: -150px; right: -100px; pointer-events: none; }
+  .bg-glow-2 { position: fixed; width: 480px; height: 480px; border-radius: 50%; background: radial-gradient(circle, rgba(18,140,65,0.11) 0%, rgba(18,140,65,0.04) 45%, transparent 70%); bottom: -120px; left: -100px; pointer-events: none; }
+  .card { position: relative; width: 100%; max-width: 420px; background: #12151a; border: 0.5px solid rgba(255,255,255,0.08); border-radius: 20px; padding: 3rem 2.5rem; animation: fadeUp 0.6s cubic-bezier(0.22,1,0.36,1) both; }
+  @keyframes fadeUp { from { opacity: 0; transform: translateY(24px); } to { opacity: 1; transform: translateY(0); } }
+  .logo-row { display: flex; align-items: center; gap: 10px; margin-bottom: 2.5rem; }
+  .logo-icon { width: 32px; height: 32px; background: #25D366; border-radius: 8px; display: flex; align-items: center; justify-content: center; }
+  .logo-name { font-family: 'Syne', sans-serif; font-size: 22px; font-weight: 700; letter-spacing: -0.5px; color: #e8e4de; }
+  .heading { font-family: 'Syne', sans-serif; font-size: 30px; font-weight: 600; line-height: 1.25; color: #e8e4de; margin-bottom: 0.75rem; letter-spacing: -0.5px; }
+  .heading em { font-style: normal; color: #25D366; }
+  .subtext { font-size: 14px; color: rgba(232,228,222,0.45); line-height: 1.6; margin-bottom: 2rem; }
+  .divider { height: 0.5px; background: rgba(255,255,255,0.07); margin-bottom: 2rem; }
+  .phone-pill { display: inline-flex; align-items: center; gap: 8px; background: rgba(37,211,102,0.07); border: 0.5px solid rgba(37,211,102,0.2); border-radius: 100px; padding: 6px 14px; font-size: 13px; color: rgba(232,228,222,0.55); margin-bottom: 2rem; }
+  .phone-dot { width: 6px; height: 6px; border-radius: 50%; background: #25D366; animation: pulse 2s ease-in-out infinite; }
+  @keyframes pulse { 0%, 100% { opacity: 1; } 50% { opacity: 0.35; } }
+  .connect-btn { display: flex; align-items: center; justify-content: center; gap: 12px; width: 100%; padding: 14px 20px; background: #e8e4de; color: #0b0d10; border: none; border-radius: 12px; font-family: 'DM Sans', sans-serif; font-size: 15px; font-weight: 500; cursor: pointer; text-decoration: none; transition: background 0.2s, transform 0.15s; }
+  .connect-btn:hover { background: #ffffff; transform: translateY(-1px); }
+  .steps { margin-top: 2rem; display: flex; flex-direction: column; gap: 12px; }
+  .step { display: flex; align-items: flex-start; gap: 12px; }
+  .step-num { width: 22px; height: 22px; border-radius: 50%; border: 0.5px solid rgba(37,211,102,0.2); display: flex; align-items: center; justify-content: center; font-size: 11px; color: rgba(37,211,102,0.45); flex-shrink: 0; margin-top: 1px; font-family: 'Syne', sans-serif; }
+  .step-text { font-size: 13px; color: rgba(232,228,222,0.4); line-height: 1.5; }
+  .footer { margin-top: 2.5rem; font-size: 11px; color: rgba(232,228,222,0.18); text-align: center; line-height: 1.6; }
+</style>
+</head>
+<body>
+  <div class="bg-grid"></div>
+  <div class="bg-glow"></div>
+  <div class="bg-glow-2"></div>
+  <div class="card">
+    <div class="logo-row">
+      <div class="logo-icon">
+        <svg viewBox="0 0 18 18" width="18" height="18" fill="none" xmlns="http://www.w3.org/2000/svg">
+          <rect x="2" y="4" width="14" height="11" rx="2" stroke="#0b0d10" stroke-width="1.5"/>
+          <path d="M6 2v4M12 2v4" stroke="#0b0d10" stroke-width="1.5" stroke-linecap="round"/>
+          <path d="M2 8h14" stroke="#0b0d10" stroke-width="1.5"/>
+          <circle cx="6.5" cy="12" r="1" fill="#0b0d10"/>
+          <circle cx="9.5" cy="12" r="1" fill="#0b0d10"/>
+        </svg>
+      </div>
+      <span class="logo-name">Jekyll</span>
+    </div>
+    <h1 class="heading">Your calendar,<br><em>by text message.</em></h1>
+    <p class="subtext">Connect Google Calendar once, then just text naturally — Jekyll handles the rest.</p>
+    <div class="divider"></div>
+    <div class="phone-pill">
+      <div class="phone-dot"></div>
+      Connecting for {{ phone }}
+    </div>
+    <a href="{{ auth_url }}" class="connect-btn">
+      <svg width="18" height="18" viewBox="0 0 18 18" xmlns="http://www.w3.org/2000/svg">
+        <path d="M17.64 9.2c0-.637-.057-1.251-.164-1.84H9v3.481h4.844c-.209 1.125-.843 2.078-1.796 2.717v2.258h2.908c1.702-1.567 2.684-3.874 2.684-6.615z" fill="#4285F4"/>
+        <path d="M9 18c2.43 0 4.467-.806 5.956-2.184l-2.908-2.258c-.806.54-1.837.86-3.048.86-2.344 0-4.328-1.584-5.036-3.711H.957v2.332C2.438 15.983 5.482 18 9 18z" fill="#34A853"/>
+        <path d="M3.964 10.707c-.18-.54-.282-1.117-.282-1.707s.102-1.167.282-1.707V4.961H.957C.347 6.175 0 7.55 0 9s.348 2.825.957 4.039l3.007-2.332z" fill="#FBBC05"/>
+        <path d="M9 3.58c1.321 0 2.508.454 3.44 1.345l2.582-2.58C13.463.891 11.426 0 9 0 5.482 0 2.438 2.017.957 4.961L3.964 7.293C4.672 5.163 6.656 3.58 9 3.58z" fill="#EA4335"/>
+      </svg>
+      Connect Google Calendar
+    </a>
+    <div class="steps">
+      <div class="step"><div class="step-num">1</div><div class="step-text">Sign in with your Google account and grant calendar access</div></div>
+      <div class="step"><div class="step-num">2</div><div class="step-text">Close this tab and return to WhatsApp</div></div>
+      <div class="step"><div class="step-num">3</div><div class="step-text">Text Jekyll anything — "dentist Friday at 3pm" — and you're live</div></div>
+    </div>
+    <p class="footer">Jekyll only reads and writes calendar events.<br>Your data is never stored or shared.</p>
+  </div>
+</body>
+</html>
