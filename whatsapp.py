@@ -261,6 +261,46 @@ def handle_create(user, text, phone, intent):
         send_whatsapp(phone, "Got it — what date and time should I set this for?")
         return
     
+    # --- Check if event is in the past or happening now ---
+    event_dt = datetime.strptime(
+        f"{event_data['date']} {event_data['time']}",
+        "%Y-%m-%d %H:%M"
+    ).replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+
+    now = datetime.now(ZoneInfo("America/Los_Angeles"))
+
+    # CASE 1: Event is in the past
+    if event_dt < now:
+        user.last_event = {
+            "needs_time_confirm": True,
+            "new_event": event_data
+        }
+        db.session.commit()
+
+        send_whatsapp(
+            phone,
+            f"This is scheduled in the past.\n\n"
+            f"{event_data['title']} on {event_data['date']} at {event_data['time']}\n\n"
+            f"Reply *Yes* to add it anyway, or send a correction."
+        )
+        return
+
+    # CASE 2: Event is happening right now (within 5 minutes)
+    if now <= event_dt <= now + timedelta(minutes=5):
+        user.last_event = {
+            "needs_time_confirm": True,
+            "new_event": event_data
+        }
+        db.session.commit()
+
+        send_whatsapp(
+            phone,
+            f"This looks like it's happening right now.\n\n"
+            f"{event_data['title']} at {event_data['time']}\n\n"
+            f"Reply *Yes* to add it anyway, or send a correction."
+        )
+        return
+    
     service = get_calendar_service(user)
     conflicts = check_conflict(service, event_data)
 
@@ -314,6 +354,10 @@ def handle_confirm(user, phone):
         send_whatsapp(phone, "Nothing pending — what would you like to add?")
         return
     event_data = user.last_event
+
+    # Handle past-time confirmation case
+    if isinstance(event_data, dict) and event_data.get("needs_time_confirm"):
+        event_data = event_data["new_event"]
 
 # Handle double booking case
     if isinstance(event_data, dict) and event_data.get("needs_double_confirm"):
