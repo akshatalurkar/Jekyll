@@ -13,6 +13,7 @@ from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from requests_oauthlib import OAuth2Session
 from zoneinfo import ZoneInfo
+from difflib import SequenceMatcher
 
 load_dotenv()
 
@@ -292,12 +293,24 @@ def get_user_calendars(user, service):
         db.session.commit()
     return user.calendars
 
+def calendar_similarity(hint, name):
+    hint_lower = hint.lower()
+    name_lower = name.lower()
+    if hint_lower in name_lower or name_lower in hint_lower:
+        return 1.0
+    return SequenceMatcher(None, hint_lower, name_lower).ratio()
+
 def resolve_calendar_id(user, service, hint):
     if not hint:
         return "primary", "Default"
     calendars = get_user_calendars(user, service)
-    match = next((c for c in calendars if hint.lower() in c["name"].lower()), None)
-    return (match["id"], match["name"]) if match else ("primary", "Default")
+    if not calendars:
+        return "primary", "Default"
+    scored = [(c, calendar_similarity(hint, c["name"])) for c in calendars]
+    best = max(scored, key=lambda x: x[1])
+    if best[1] >= 0.6:
+        return best[0]["id"], best[0]["name"]
+    return "primary", "Default"
 
 def check_conflict(service, new_event):
     start = datetime.strptime(
@@ -348,7 +361,7 @@ def handle_create(user, text, phone, intent):
         send_whatsapp(phone, f"This looks like it's happening right now.\n\n{event_data['title']} at {event_data['time']}\n\nReply *Yes* to add it anyway, or send a correction.")
         return
 
-    service = get_calendar_service(user)  # ← defined ONCE here
+    service = get_calendar_service(user)
     conflicts = check_conflict(service, event_data)
 
     if conflicts:
@@ -365,29 +378,6 @@ def handle_create(user, text, phone, intent):
         send_whatsapp(phone, f"You already have {existing['summary']} scheduled for {existing_time}.\n\nDo you still want to add {event_data['title']} on {event_data['date']} at {event_data['time']}?\n\nReply *Yes* to confirm, or send a correction.")
         return
 
-    calendar_id, calendar_name = resolve_calendar_id(user, service, event_data.get("calendar"))  # ← called ONCE here
-    event_data["calendar_id"] = calendar_id
-    event_data["calendar_name"] = calendar_name
-
-    duration = event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES
-    duration_line = f"{duration} min (default)" if not event_data.get("duration_minutes") else f"{duration} min"
-    location_line = f"\n{event_data['location']}" if event_data.get("location") else "Location not set"
-    calendar_line = f"Calendar: {calendar_name}"
-
-    user.last_event = event_data
-    db.session.commit()
-
-    send_whatsapp(
-        phone,
-        f"Here's what I'll add:\n\n"
-        f"*{event_data['title']}*\n"
-        f"{event_data['date']} at {event_data['time']}\n"
-        f"{duration_line}\n"
-        f"{location_line}\n"
-        f"{calendar_line}\n\n"
-        f"Reply *Yes* to confirm, or send a correction."
-    )        
-    
     calendar_id, calendar_name = resolve_calendar_id(user, service, event_data.get("calendar"))
     event_data["calendar_id"] = calendar_id
     event_data["calendar_name"] = calendar_name
@@ -396,7 +386,7 @@ def handle_create(user, text, phone, intent):
     duration_line = f"{duration} min (default)" if not event_data.get("duration_minutes") else f"{duration} min"
     location_line = f"\n{event_data['location']}" if event_data.get("location") else "Location not set"
     calendar_line = f"Calendar: {calendar_name}"
-    
+
     user.last_event = event_data
     db.session.commit()
 
