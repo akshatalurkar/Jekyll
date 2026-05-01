@@ -169,7 +169,6 @@ DURATION:
 LOCATION:
 - Only if explicitly mentioned
 - Never infer
-- null if not mentioned
 
 CONFIDENCE:
 - "high" → title, date, time all clear
@@ -337,7 +336,7 @@ def handle_create(user, text, phone, intent):
     
     duration = event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES
     duration_line = f"{duration} min (default)" if not event_data.get("duration_minutes") else f"{duration} min"
-    location_line = f"\n{event_data['location']}" if event_data.get("location") else ""
+    location_line = f"\n{event_data['location']}" if event_data.get("location") else "Location not set"
 
     send_whatsapp(
         phone,
