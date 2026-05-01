@@ -328,8 +328,7 @@ def handle_create(user, text, phone, intent):
     if not event_data.get("date") or not event_data.get("time"):
         send_whatsapp(phone, "Got it — what date and time should I set this for?")
         return
-    
-    # --- Check if event is in the past or happening now ---
+
     event_dt = datetime.strptime(
         f"{event_data['date']} {event_data['time']}",
         "%Y-%m-%d %H:%M"
@@ -337,72 +336,57 @@ def handle_create(user, text, phone, intent):
 
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
 
-    # CASE 1: Event is in the past
     if event_dt < now:
-        user.last_event = {
-            "needs_time_confirm": True,
-            "new_event": event_data
-        }
+        user.last_event = {"needs_time_confirm": True, "new_event": event_data}
         db.session.commit()
-
-        send_whatsapp(
-            phone,
-            f"This is scheduled in the past.\n\n"
-            f"{event_data['title']} on {event_data['date']} at {event_data['time']}\n\n"
-            f"Reply *Yes* to add it anyway, or send a correction."
-        )
+        send_whatsapp(phone, f"This is scheduled in the past.\n\n{event_data['title']} on {event_data['date']} at {event_data['time']}\n\nReply *Yes* to add it anyway, or send a correction.")
         return
-    
-    calendar_id, calendar_name = resolve_calendar_id(user, service, event_data.get("calendar"))
 
-    event_data["calendar_id"] = calendar_id
-    event_data["calendar_name"] = calendar_name
-
-    # CASE 2: Event is happening right now (within 5 minutes)
     if now <= event_dt <= now + timedelta(minutes=5):
-        user.last_event = {
-            "needs_time_confirm": True,
-            "new_event": event_data
-        }
+        user.last_event = {"needs_time_confirm": True, "new_event": event_data}
         db.session.commit()
-
-        send_whatsapp(
-            phone,
-            f"This looks like it's happening right now.\n\n"
-            f"{event_data['title']} at {event_data['time']}\n\n"
-            f"Reply *Yes* to add it anyway, or send a correction."
-        )
+        send_whatsapp(phone, f"This looks like it's happening right now.\n\n{event_data['title']} at {event_data['time']}\n\nReply *Yes* to add it anyway, or send a correction.")
         return
-    
-    service = get_calendar_service(user)
+
+    service = get_calendar_service(user)  # ← defined ONCE here
     conflicts = check_conflict(service, event_data)
 
     if conflicts:
         existing = conflicts[0]
-
         existing_start = existing["start"].get("dateTime", existing["start"].get("date"))
-
         dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
-
         existing_time = dt.strftime("%a %b %d at %I:%M %p")
-
         user.last_event = {
             "new_event": event_data,
-            "conflict_event": {
-                "title": existing["summary"],
-                "time": existing_time
-            },
+            "conflict_event": {"title": existing["summary"], "time": existing_time},
             "needs_double_confirm": True
         }
         db.session.commit()
+        send_whatsapp(phone, f"You already have {existing['summary']} scheduled for {existing_time}.\n\nDo you still want to add {event_data['title']} on {event_data['date']} at {event_data['time']}?\n\nReply *Yes* to confirm, or send a correction.")
+        return
 
-        send_whatsapp(
-            phone,
-            f"You already have {existing['summary']} scheduled for {existing_time}.\n\n"
-            f"Do you still want to add {event_data['title']} on {event_data['date']} at {event_data['time']}?\n\n"
-            f"Reply *Yes* to confirm, or send a correction."
-        )
-        return        
+    calendar_id, calendar_name = resolve_calendar_id(user, service, event_data.get("calendar"))  # ← called ONCE here
+    event_data["calendar_id"] = calendar_id
+    event_data["calendar_name"] = calendar_name
+
+    duration = event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES
+    duration_line = f"{duration} min (default)" if not event_data.get("duration_minutes") else f"{duration} min"
+    location_line = f"\n{event_data['location']}" if event_data.get("location") else "Location not set"
+    calendar_line = f"Calendar: {calendar_name}"
+
+    user.last_event = event_data
+    db.session.commit()
+
+    send_whatsapp(
+        phone,
+        f"Here's what I'll add:\n\n"
+        f"*{event_data['title']}*\n"
+        f"{event_data['date']} at {event_data['time']}\n"
+        f"{duration_line}\n"
+        f"{location_line}\n"
+        f"{calendar_line}\n\n"
+        f"Reply *Yes* to confirm, or send a correction."
+    )        
     
     calendar_id, calendar_name = resolve_calendar_id(user, service, event_data.get("calendar"))
     event_data["calendar_id"] = calendar_id
