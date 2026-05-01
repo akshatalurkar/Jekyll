@@ -404,6 +404,7 @@ def handle_create(user, text, phone, intent):
         )
         return        
     
+    calendar_id, calendar_name = resolve_calendar_id(user, service, event_data.get("calendar"))
     event_data["calendar_id"] = calendar_id
     event_data["calendar_name"] = calendar_name
 
