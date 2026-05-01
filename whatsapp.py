@@ -450,27 +450,41 @@ def handle_confirm(user, phone):
     location_str = f" at {event_data['location']}" if event_data.get("location") else ""
     send_whatsapp(phone, f"Added — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}")
 
-def find_upcoming_event(service, keyword):
+def find_upcoming_event(user, service, keyword):
     now = datetime.utcnow().isoformat() + "Z"
-    events_result = service.events().list(
-        calendarId="primary",
-        timeMin=now,
-        maxResults=10,
-        singleEvents=True,
-        orderBy="startTime"
-    ).execute()
-    events = events_result.get("items", [])
-    return next((e for e in events if keyword in e.get("summary", "").lower()), None)
+    calendars = get_user_calendars(user, service)
+
+    for cal in calendars:
+        events_result = service.events().list(
+            calendarId=cal["id"],
+            timeMin=now,
+            maxResults=10,
+            singleEvents=True,
+            orderBy="startTime"
+        ).execute()
+
+        for event in events_result.get("items", []):
+            if keyword in event.get("summary", "").lower():
+                event["calendar_id"] = cal["id"]
+                event["calendar_name"] = cal["name"]
+                return event
+
+    return None
 
 def handle_delete(user, text, phone):
     delete_data = parse_delete(text)
     title = delete_data.get("title", "").lower()
     service = get_calendar_service(user)
-    match = find_upcoming_event(service, title)
+    match = find_upcoming_event(user, service, title)
     if not match:
         send_whatsapp(phone, f"Couldn't find '{delete_data['title']}' coming up.")
         return
-    service.events().delete(calendarId="primary", eventId=match["id"]).execute()
+    
+    service.events().delete(
+        calendarId=match["calendar_id"],
+        eventId=match["id"]
+    ).execute()
+
     send_whatsapp(phone, f"Removed {match['summary']} ")
 
 def handle_edit(user, text, phone):
