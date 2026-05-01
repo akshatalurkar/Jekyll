@@ -4,7 +4,7 @@ import secrets
 import hashlib
 import base64
 import requests
-from datetime import date, datetime, timedelta
+from datetime import datetime, timedelta
 from flask import Flask, request, session, render_template
 from dotenv import load_dotenv
 from flask_sqlalchemy import SQLAlchemy
@@ -41,7 +41,6 @@ class ProcessedMessage(db.Model):
     message_id = db.Column(db.String(255), unique=True, nullable=False)
     created_at = db.Column(db.DateTime, default=datetime.utcnow)
 
-
 with app.app_context():
     db.create_all()
 
@@ -50,6 +49,9 @@ BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 
 
 # ── Gemini helpers ──────────────────────────────────────────
+def parse_gemini_json(response):
+    raw = response.text.strip().replace("```json", "").replace("```", "")
+    return json.loads(raw)
 
 def classify_intent(message):
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
@@ -74,6 +76,7 @@ LIST_TODAY - asking what's on the calendar today
 LIST_TOMORROW - asking what's on the calendar tomorrow
 LIST_WEEK - asking what's coming up this week or in the next few days
 CONFIRM - confirming a pending action: "yes", "yep", "yeah", "correct", "sure", "ok", "do it"
+EDIT - modifying, rescheduling, or changing details of an existing event
 UNKNOWN - anything else
 
 EXAMPLES:
@@ -98,6 +101,10 @@ EXAMPLES:
 "what's coming up" → LIST_WEEK
 "yes" → CONFIRM
 "yeah do it" → CONFIRM
+"move my dentist to 4pm" → EDIT
+"reschedule coffee with jake to tomorrow" → EDIT
+"change my 3pm from X location to Y location" → EDIT
+"make the team sync 30 mins instead" → EDIT
 "thanks" → UNKNOWN
 "lol" → UNKNOWN
 
@@ -180,8 +187,7 @@ Message: "{message}" """
         model="gemini-2.5-flash",
         contents=prompt
     )
-    raw = response.text.strip().replace("```json", "").replace("```", "")
-    return json.loads(raw)
+    return parse_gemini_json(response)
 
 
 def parse_delete(message):
@@ -215,10 +221,52 @@ Message: "{message}" """
         model="gemini-2.5-flash",
         contents=prompt
     )
-    raw = response.text.strip().replace("```json", "").replace("```", "")
-    return json.loads(raw)
+    return parse_gemini_json(response)
 
+def parse_edit(message, last_event=None):
+    now = datetime.now(ZoneInfo("America/Los_Angeles"))
+    today = now.strftime("%Y-%m-%d")
+    today_display = now.strftime("%A, %B %d, %Y")
+    tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
+    last_event_context = f"\nLast event discussed: {json.dumps(last_event)}" if last_event else ""
 
+    prompt = f"""You are Jekyll, a WhatsApp calendar assistant. Parse what event the user wants to edit and what they want to change.
+
+Current date: {today} ({today_display})
+Current time: {now.strftime("%H:%M")} (Pacific Time)
+{last_event_context}
+
+Return ONLY a valid JSON object. No explanations, comments, or markdown.
+
+OUTPUT SCHEMA:
+{{
+  "find": string,
+  "changes": {{
+    "title": string | null,
+    "date": "YYYY-MM-DD" | null,
+    "time": "HH:MM" | null,
+    "duration_minutes": integer | null,
+    "location": string | null
+  }}
+}}
+
+FIND: Short lowercase keyword(s) to search the calendar for the event.
+CHANGES: Only include fields the user explicitly wants to change. All others should be null.
+
+EXAMPLES:
+"move my dentist to 4pm" → {{"find": "dentist", "changes": {{"time": "16:00"}}}}
+"reschedule coffee with jake to tomorrow" → {{"find": "coffee with jake", "changes": {{"date": "{tomorrow}"}}}}
+"make the team sync 30 mins instead" → {{"find": "team sync", "changes": {{"duration_minutes": 30}}}}
+"change my 3pm meeting to friday at noon" → {{"find": "3pm", "changes": {{"date": null, "time": "12:00"}}}}
+
+Message: "{message}" """
+
+    response = client.models.generate_content(
+        model="gemini-2.5-flash",
+        contents=prompt
+    )
+    return parse_gemini_json(response)
+    
 # ── Google Calendar helpers ─────────────────────────────────
 
 def get_calendar_service(user):
@@ -237,7 +285,7 @@ def check_conflict(service, new_event):
         "%Y-%m-%d %H:%M"
     ).replace(tzinfo=ZoneInfo("America/Los_Angeles"))
 
-    end = start + timedelta(minutes=new_event.get("duration_minutes") or 60)
+    end = start + timedelta(minutes=new_event.get("duration_minutes") or DEFAULT_DURATION_MINUTES)
 
     events_result = service.events().list(
         calendarId="primary",
@@ -353,20 +401,35 @@ def handle_confirm(user, phone):
     if not user.last_event:
         send_whatsapp(phone, "Nothing pending — what would you like to add?")
         return
-    event_data = user.last_event
 
-    # Handle past-time confirmation case
+    event_data = user.last_event
+    service = get_calendar_service(user)
+
     if isinstance(event_data, dict) and event_data.get("needs_time_confirm"):
         event_data = event_data["new_event"]
-
-# Handle double booking case
-    if isinstance(event_data, dict) and event_data.get("needs_double_confirm"):
+    elif isinstance(event_data, dict) and event_data.get("needs_double_confirm"):
         event_data = event_data["new_event"]
+    elif isinstance(event_data, dict) and event_data.get("needs_edit_confirm"):
+        start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
+        end = start + timedelta(minutes=event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES)
+        updated_body = {
+            "summary": event_data["title"],
+            "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
+            "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
+        }
+        if event_data.get("location"):
+            updated_body["location"] = event_data["location"]
+        service.events().patch(calendarId="primary", eventId=event_data["event_id"], body=updated_body).execute()
+        user.last_event = None
+        db.session.commit()
+        location_str = f" at {event_data['location']}" if event_data.get("location") else ""
+        send_whatsapp(phone, f"Updated — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}")
+        return
 
     if not event_data.get("date") or not event_data.get("time"):
-        send_whatsapp(phone, "What date and time? 🗓️")
+        send_whatsapp(phone, "What date and time?")
         return
-    service = get_calendar_service(user)
+
     start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
     end = start + timedelta(minutes=event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES)
     event = {
@@ -380,13 +443,9 @@ def handle_confirm(user, phone):
     user.last_event = None
     db.session.commit()
     location_str = f" at {event_data['location']}" if event_data.get("location") else ""
-    send_whatsapp(phone, f"Added - {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}")
+    send_whatsapp(phone, f"Added — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}")
 
-
-def handle_delete(user, text, phone):
-    delete_data = parse_delete(text)
-    title = delete_data.get("title", "").lower()
-    service = get_calendar_service(user)
+def find_upcoming_event(service, keyword):
     now = datetime.utcnow().isoformat() + "Z"
     events_result = service.events().list(
         calendarId="primary",
@@ -396,12 +455,69 @@ def handle_delete(user, text, phone):
         orderBy="startTime"
     ).execute()
     events = events_result.get("items", [])
-    match = next((e for e in events if title in e.get("summary", "").lower()), None)
+    return next((e for e in events if keyword in e.get("summary", "").lower()), None)
+
+def handle_delete(user, text, phone):
+    delete_data = parse_delete(text)
+    title = delete_data.get("title", "").lower()
+    service = get_calendar_service(user)
+    match = find_upcoming_event(service, title)
     if not match:
         send_whatsapp(phone, f"Couldn't find '{delete_data['title']}' coming up.")
         return
     service.events().delete(calendarId="primary", eventId=match["id"]).execute()
     send_whatsapp(phone, f"Removed {match['summary']} ")
+
+def handle_edit(user, text, phone):
+    edit_data = parse_edit(text, last_event=user.last_event)
+    find = edit_data.get("find", "").lower()
+    changes = edit_data.get("changes", {})
+
+    if not find:
+        send_whatsapp(phone, "Which event would you like to edit?")
+        return
+
+    service = get_calendar_service(user)
+    match = find_upcoming_event(service, find)
+
+    if not match:
+        send_whatsapp(phone, f"Couldn't find '{edit_data['find']}' coming up.")
+        return
+
+    existing_start = match["start"].get("dateTime", match["start"].get("date"))
+    dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
+
+    updated = {
+        "event_id": match["id"],
+        "title": changes.get("title") or match["summary"],
+        "date": changes.get("date") or dt.strftime("%Y-%m-%d"),
+        "time": changes.get("time") or dt.strftime("%H:%M"),
+        "duration_minutes": changes.get("duration_minutes") or DEFAULT_DURATION_MINUTES,
+        "location": changes.get("location") or match.get("location"),
+        "needs_edit_confirm": True
+    }
+
+    user.last_event = updated
+    db.session.commit()
+
+    change_lines = []
+    if changes.get("title"):
+        change_lines.append(f"Title: {match['summary']} → {changes['title']}")
+    if changes.get("date"):
+        change_lines.append(f"Date: {dt.strftime('%Y-%m-%d')} → {changes['date']}")
+    if changes.get("time"):
+        change_lines.append(f"Time: {dt.strftime('%H:%M')} → {changes['time']}")
+    if changes.get("duration_minutes"):
+        change_lines.append(f"Duration: → {changes['duration_minutes']} min")
+    if changes.get("location"):
+        change_lines.append(f"Location: → {changes['location']}")
+
+    send_whatsapp(
+        phone,
+        f"Here's what I'll change for *{match['summary']}*:\n\n"
+        + "\n".join(change_lines)
+        + "\n\nReply *Yes* to confirm, or send a correction."
+    )
 
 
 def handle_list(user, phone, intent):
@@ -546,6 +662,9 @@ def webhook():
 
         elif intent == "DELETE":
             handle_delete(user, text, phone)
+
+        elif intent == "EDIT":
+            handle_edit(user, text, phone)
 
         elif intent in ("LIST_TODAY", "LIST_TOMORROW", "LIST_WEEK"):
             handle_list(user, phone, intent)
