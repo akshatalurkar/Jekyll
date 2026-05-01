@@ -34,6 +34,7 @@ class User(db.Model):
     oauth_token = db.Column(db.Text, nullable=True)
     refresh_token = db.Column(db.Text, nullable=True)
     last_event = db.Column(db.JSON, nullable=True)
+    calendars = db.Column(db.JSON, nullable=True)
 
 
 class ProcessedMessage(db.Model):
@@ -154,7 +155,7 @@ OUTPUT SCHEMA:
   "time": "HH:MM" | null,
   "duration_minutes": integer | null,
   "location": string | null,
-  "confidence": "high" | "medium" | "low"
+  "calendar": string | null
 }}
 
 TITLE:
@@ -176,11 +177,12 @@ DURATION:
 LOCATION:
 - Only if explicitly mentioned
 - Never infer
+- null if not mentioned
 
-CONFIDENCE:
-- "high" → title, date, time all clear
-- "medium" → one field inferred
-- "low" → multiple fields inferred or message is very vague
+CALENDAR:
+- Only if explicitly mentioned ("on my work calendar", "add to school")
+- Never infer
+- null if not mentioned
 
 Message: "{message}" """
     response = client.models.generate_content(
@@ -246,7 +248,8 @@ OUTPUT SCHEMA:
     "date": "YYYY-MM-DD" | null,
     "time": "HH:MM" | null,
     "duration_minutes": integer | null,
-    "location": string | null
+    "location": string | null,
+    "calendar": string | null
   }}
 }}
 
@@ -278,6 +281,23 @@ def get_calendar_service(user):
         client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
     )
     return build("calendar", "v3", credentials=creds)
+
+def get_user_calendars(user, service):
+    if not user.calendars:
+        result = service.calendarList().list().execute()
+        user.calendars = [
+            {"id": c["id"], "name": c["summary"]}
+            for c in result.get("items", [])
+        ]
+        db.session.commit()
+    return user.calendars
+
+def resolve_calendar_id(user, service, hint):
+    if not hint:
+        return "primary", "Default"
+    calendars = get_user_calendars(user, service)
+    match = next((c for c in calendars if hint.lower() in c["name"].lower()), None)
+    return (match["id"], match["name"]) if match else ("primary", "Default")
 
 def check_conflict(service, new_event):
     start = datetime.strptime(
@@ -332,6 +352,11 @@ def handle_create(user, text, phone, intent):
             f"Reply *Yes* to add it anyway, or send a correction."
         )
         return
+    
+    calendar_id, calendar_name = resolve_calendar_id(user, service, event_data.get("calendar"))
+
+    event_data["calendar_id"] = calendar_id
+    event_data["calendar_name"] = calendar_name
 
     # CASE 2: Event is happening right now (within 5 minutes)
     if now <= event_dt <= now + timedelta(minutes=5):
@@ -378,13 +403,17 @@ def handle_create(user, text, phone, intent):
             f"Reply *Yes* to confirm, or send a correction."
         )
         return        
-
-    user.last_event = event_data
-    db.session.commit()
     
+    event_data["calendar_id"] = calendar_id
+    event_data["calendar_name"] = calendar_name
+
     duration = event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES
     duration_line = f"{duration} min (default)" if not event_data.get("duration_minutes") else f"{duration} min"
     location_line = f"\n{event_data['location']}" if event_data.get("location") else "Location not set"
+    calendar_line = f"Calendar: {calendar_name}"
+    
+    user.last_event = event_data
+    db.session.commit()
 
     send_whatsapp(
         phone,
@@ -392,7 +421,8 @@ def handle_create(user, text, phone, intent):
         f"*{event_data['title']}*\n"
         f"{event_data['date']} at {event_data['time']}\n"
         f"{duration_line}\n"
-        f"{location_line}\n\n"
+        f"{location_line}\n"
+        f"{calendar_line}\n\n"
         f"Reply *Yes* to confirm, or send a correction."
     )
 
@@ -419,7 +449,7 @@ def handle_confirm(user, phone):
         }
         if event_data.get("location"):
             updated_body["location"] = event_data["location"]
-        service.events().patch(calendarId="primary", eventId=event_data["event_id"], body=updated_body).execute()
+        service.events().patch(calendarId=event_data.get("calendar_id", "primary"), eventId=event_data["event_id"], body=updated_body).execute()
         user.last_event = None
         db.session.commit()
         location_str = f" at {event_data['location']}" if event_data.get("location") else ""
@@ -439,7 +469,7 @@ def handle_confirm(user, phone):
     }
     if event_data.get("location"):
         event["location"] = event_data["location"]
-    service.events().insert(calendarId="primary", body=event).execute()
+    service.events().insert(calendarId=event_data.get("calendar_id", "primary"), body=event).execute()
     user.last_event = None
     db.session.commit()
     location_str = f" at {event_data['location']}" if event_data.get("location") else ""
@@ -486,6 +516,7 @@ def handle_edit(user, text, phone):
 
     existing_start = match["start"].get("dateTime", match["start"].get("date"))
     dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
+    calendar_id, calendar_name = resolve_calendar_id(user, service, changes.get("calendar"))
 
     updated = {
         "event_id": match["id"],
@@ -494,7 +525,9 @@ def handle_edit(user, text, phone):
         "time": changes.get("time") or dt.strftime("%H:%M"),
         "duration_minutes": changes.get("duration_minutes") or DEFAULT_DURATION_MINUTES,
         "location": changes.get("location") or match.get("location"),
-        "needs_edit_confirm": True
+        "needs_edit_confirm": True,
+        "calendar_id": calendar_id,
+        "calendar_name": calendar_name
     }
 
     user.last_event = updated
@@ -511,6 +544,8 @@ def handle_edit(user, text, phone):
         change_lines.append(f"Duration: → {changes['duration_minutes']} min")
     if changes.get("location"):
         change_lines.append(f"Location: → {changes['location']}")
+    if changes.get("calendar"):
+        change_lines.append(f"Calendar: → {calendar_name}")
 
     send_whatsapp(
         phone,
@@ -591,7 +626,7 @@ def auth(phone):
     oauth = OAuth2Session(
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         redirect_uri=f"{BASE_URL}/oauth/callback",
-        scope=["https://www.googleapis.com/auth/calendar.events"]
+        scope=["https://www.googleapis.com/auth/calendar.events", "https://www.googleapis.com/auth/calendar.readonly"]
     )
     auth_url, state = oauth.authorization_url(
         "https://accounts.google.com/o/oauth2/auth",
