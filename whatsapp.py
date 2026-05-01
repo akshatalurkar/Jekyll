@@ -343,7 +343,7 @@ def handle_create(user, text, phone, intent):
         f"Here's what I'll add:\n\n"
         f"*{event_data['title']}*\n"
         f"{event_data['date']} at {event_data['time']}\n"
-        f"{duration_line}"
+        f"{duration_line}\n"
         f"{location_line}\n\n"
         f"Reply *Yes* to confirm, or send a correction."
     )
