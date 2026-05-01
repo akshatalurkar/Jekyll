@@ -25,6 +25,8 @@ app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(16))
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 db = SQLAlchemy(app)
 
+DEFAULT_DURATION_MINUTES = 60
+
 
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
@@ -163,7 +165,6 @@ TIME:
 
 DURATION:
 - Explicit value always wins
-- default → 60
 
 LOCATION:
 - Only if explicitly mentioned
@@ -334,7 +335,7 @@ def handle_create(user, text, phone, intent):
     user.last_event = event_data
     db.session.commit()
     
-    duration = event_data.get("duration_minutes") or 60
+    duration = event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES
     duration_line = f"{duration} min (default)" if not event_data.get("duration_minutes") else f"{duration} min"
     location_line = f"\n{event_data['location']}" if event_data.get("location") else ""
 
@@ -368,7 +369,7 @@ def handle_confirm(user, phone):
         return
     service = get_calendar_service(user)
     start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
-    end = start + timedelta(minutes=event_data.get("duration_minutes") or 60)
+    end = start + timedelta(minutes=event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES)
     event = {
         "summary": event_data["title"],
         "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
