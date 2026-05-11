@@ -4,7 +4,6 @@ import secrets
 import hashlib
 import base64
 import requests
-from datetime import datetime, timedelta
 from flask import Flask, request, session, render_template
 from dotenv import load_dotenv
 from flask_sqlalchemy import SQLAlchemy
@@ -14,17 +13,20 @@ from googleapiclient.discovery import build
 from requests_oauthlib import OAuth2Session
 from zoneinfo import ZoneInfo
 from difflib import SequenceMatcher
-
-os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+from google.auth.transport.requests import Request
+from datetime import datetime, timedelta, timezone
 
 load_dotenv()
+
+if os.getenv("FLASK_ENV") == "development":
+    os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
 
 database_url = os.getenv("DATABASE_URL", "sqlite:///users.db")
 if database_url.startswith("postgres://"):
     database_url = database_url.replace("postgres://", "postgresql://", 1)
 
 app = Flask(__name__)
-app.secret_key = os.getenv("FLASK_SECRET_KEY", secrets.token_hex(16))
+app.secret_key = os.environ["FLASK_SECRET_KEY"]
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 db = SQLAlchemy(app)
 
@@ -38,12 +40,13 @@ class User(db.Model):
     refresh_token = db.Column(db.Text, nullable=True)
     last_event = db.Column(db.JSON, nullable=True)
     calendars = db.Column(db.JSON, nullable=True)
+    calendars_updated_at = db.Column(db.DateTime, nullable=True)
 
 
 class ProcessedMessage(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     message_id = db.Column(db.String(255), unique=True, nullable=False)
-    created_at = db.Column(db.DateTime, default=datetime.utcnow)
+    created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
 with app.app_context():
     db.create_all()
@@ -283,15 +286,26 @@ def get_calendar_service(user):
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
     )
+    if creds.expired and creds.refresh_token:
+        creds.refresh(Request())
+        user.oauth_token = creds.token
+        db.session.commit()
+        
     return build("calendar", "v3", credentials=creds)
 
 def get_user_calendars(user, service):
-    if not user.calendars:
+    stale = (
+        not user.calendars
+        or not user.calendars_updated_at
+        or datetime.now(timezone.utc) - user.calendars_updated_at.replace(tzinfo=timezone.utc) > timedelta(hours=24)
+    )
+    if stale:
         result = service.calendarList().list().execute()
         user.calendars = [
             {"id": c["id"], "name": c["summary"]}
             for c in result.get("items", [])
         ]
+        user.calendars_updated_at = datetime.now(timezone.utc)
         db.session.commit()
     return user.calendars
 
@@ -314,24 +328,27 @@ def resolve_calendar_id(user, service, hint):
         return best[0]["id"], best[0]["name"]
     return "primary", "Default"
 
-def check_conflict(service, new_event):
+def check_conflict(user, service, new_event):
     start = datetime.strptime(
         f"{new_event['date']} {new_event['time']}",
         "%Y-%m-%d %H:%M"
     ).replace(tzinfo=ZoneInfo("America/Los_Angeles"))
 
     end = start + timedelta(minutes=new_event.get("duration_minutes") or DEFAULT_DURATION_MINUTES)
+    calendars = get_user_calendars(user, service)
+    all_conflicts = []
 
-    events_result = service.events().list(
-        calendarId="primary",
-        timeMin=(start - timedelta(hours=1)).isoformat(),
-        timeMax=(end + timedelta(hours=1)).isoformat(),
-        singleEvents=True,
-        orderBy="startTime"
-    ).execute()
+    for cal in calendars:
+        events_result = service.events().list(
+            calendarId=cal["id"],
+            timeMin=(start - timedelta(hours=1)).isoformat(),
+            timeMax=(end + timedelta(hours=1)).isoformat(),
+            singleEvents=True,
+            orderBy="startTime"
+        ).execute()
+        all_conflicts.extend(events_result.get("items", []))
 
-    events = events_result.get("items", [])
-    return events
+    return all_conflicts
 
 def handle_create(user, text, phone, intent):
     event_data = parse_event(text, intent, last_event=user.last_event)
@@ -364,7 +381,7 @@ def handle_create(user, text, phone, intent):
         return
 
     service = get_calendar_service(user)
-    conflicts = check_conflict(service, event_data)
+    conflicts = check_conflict(user, service, event_data)
 
     if conflicts:
         existing = conflicts[0]
@@ -403,7 +420,6 @@ def handle_create(user, text, phone, intent):
         f"Reply *Yes* to confirm, or send a correction."
     )
 
-
 def handle_confirm(user, phone):
     if not user.last_event:
         send_whatsapp(phone, "Nothing pending — what would you like to add?")
@@ -412,12 +428,21 @@ def handle_confirm(user, phone):
     event_data = user.last_event
     service = get_calendar_service(user)
 
-    if isinstance(event_data, dict) and event_data.get("needs_time_confirm"):
+    if event_data.get("needs_delete_confirm"):
+        service.events().delete(
+            calendarId=event_data["calendar_id"],
+            eventId=event_data["event_id"]
+        ).execute()
+        user.last_event = None
+        db.session.commit()
+        send_whatsapp(phone, f"Removed {event_data['title']}")
+        return
+
+    if event_data.get("needs_time_confirm") or event_data.get("needs_double_confirm"):
         event_data = event_data["new_event"]
-    elif isinstance(event_data, dict) and event_data.get("needs_double_confirm"):
-        event_data = event_data["new_event"]
-    elif isinstance(event_data, dict) and event_data.get("needs_edit_confirm"):
-        start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
+
+    elif event_data.get("needs_edit_confirm"):
+        start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo("America/Los_Angeles"))
         end = start + timedelta(minutes=event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES)
         updated_body = {
             "summary": event_data["title"],
@@ -453,7 +478,7 @@ def handle_confirm(user, phone):
     send_whatsapp(phone, f"Added — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}")
 
 def find_upcoming_event(user, service, keyword):
-    now = datetime.utcnow().isoformat() + "Z"
+    now = datetime.now(timezone.utc).isoformat()
     calendars = get_user_calendars(user, service)
 
     for cal in calendars:
@@ -478,16 +503,24 @@ def handle_delete(user, text, phone):
     title = delete_data.get("title", "").lower()
     service = get_calendar_service(user)
     match = find_upcoming_event(user, service, title)
-    if not match:
-        send_whatsapp(phone, f"Couldn't find '{delete_data['title']}' coming up.")
-        return
-    
-    service.events().delete(
-        calendarId=match["calendar_id"],
-        eventId=match["id"]
-    ).execute()
 
-    send_whatsapp(phone, f"Removed {match['summary']} ")
+    if not match:
+        send_whatsapp(phone, f"Couldn't find '{delete_data['title']}'")
+        return
+
+    existing_start = match["start"].get("dateTime", match["start"].get("date"))
+    dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
+
+    user.last_event = {
+        "needs_delete_confirm": True,
+        "event_id": match["id"],
+        "calendar_id": match["calendar_id"],
+        "title": match["summary"],
+        "time": dt.strftime("%a %b %d at %I:%M %p")
+    }
+    db.session.commit()
+
+    send_whatsapp(phone, f"Remove *{match['summary']}* on {dt.strftime('%a %b %d at %I:%M %p')}?\n\nReply *Yes* to confirm.")
 
 def handle_edit(user, text, phone):
     edit_data = parse_edit(text, last_event=user.last_event)
@@ -499,7 +532,7 @@ def handle_edit(user, text, phone):
         return
 
     service = get_calendar_service(user)
-    match = find_upcoming_event(service, find)
+    match = find_upcoming_event(user, service, find)
 
     if not match:
         send_whatsapp(phone, f"Couldn't find '{edit_data['find']}' coming up.")
@@ -564,22 +597,28 @@ def handle_list(user, phone, intent):
         time_max = (now + timedelta(days=7)).isoformat()
         label = "this week"
 
-    events_result = service.events().list(
-        calendarId="primary",
-        timeMin=time_min,
-        timeMax=time_max,
-        maxResults=5,
-        singleEvents=True,
-        orderBy="startTime"
-    ).execute()
-    events = events_result.get("items", [])
+    calendars = get_user_calendars(user, service)
+    all_events = []
 
-    if not events:
+    for cal in calendars:
+        events_result = service.events().list(
+            calendarId=cal["id"],
+            timeMin=time_min,
+            timeMax=time_max,
+            maxResults=5,
+            singleEvents=True,
+            orderBy="startTime"
+        ).execute()
+        all_events.extend(events_result.get("items", []))
+
+    if not all_events:
         send_whatsapp(phone, f"Nothing on the calendar {label}.")
         return
 
+    all_events.sort(key=lambda e: e["start"].get("dateTime", e["start"].get("date")))
+
     lines = [f"Here's {label} on your calendar:"]
-    for e in events:
+    for e in all_events[:10]:
         start = e["start"].get("dateTime", e["start"].get("date"))
         dt = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
         lines.append(f"• {e['summary']} — {dt.strftime('%a %b %d at %I:%M %p')}")
@@ -659,6 +698,8 @@ def webhook():
     if ProcessedMessage.query.filter_by(message_id=message_id).first():
         return "OK", 200
     db.session.add(ProcessedMessage(message_id=message_id))
+    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+    ProcessedMessage.query.filter(ProcessedMessage.created_at < cutoff).delete()
     db.session.commit()
 
     user = User.query.filter_by(phone=phone).first()
