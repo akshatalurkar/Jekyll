@@ -15,6 +15,8 @@ from requests_oauthlib import OAuth2Session
 from zoneinfo import ZoneInfo
 from difflib import SequenceMatcher
 
+os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
+
 load_dotenv()
 
 database_url = os.getenv("DATABASE_URL", "sqlite:///users.db")
