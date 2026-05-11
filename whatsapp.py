@@ -50,7 +50,7 @@ with app.app_context():
 
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
-
+NOTION_URL = "https://www.notion.so/User-guide-for-Jekyll-35d2b89f0b3980faa54eccbd930609c0?source=copy_link"
 
 # ── Gemini helpers ──────────────────────────────────────────
 def parse_gemini_json(response):
@@ -670,7 +670,7 @@ def webhook():
             f"To get started, connect your Google Calendar here: {BASE_URL}/auth/{phone}\n\n"
             f"Once you're set up, just text me what you'd like to add to your calendar.\n\n"
             f"Examples: \"Dentist Friday at 3pm\", \"Food at noon for 45 mins at Chipotle\"\n\n"
-            f"For detailed instructions on how to use this, click here: https://your-link-here"
+            f"For detailed instructions on how to use this, click here: {NOTION_URL}"
         )
         return "OK", 200
 
