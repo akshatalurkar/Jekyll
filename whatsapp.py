@@ -4,6 +4,7 @@ import secrets
 import hashlib
 import base64
 import requests
+import hmac
 from flask import Flask, request, session, render_template
 from dotenv import load_dotenv
 from flask_sqlalchemy import SQLAlchemy
@@ -15,6 +16,7 @@ from zoneinfo import ZoneInfo
 from difflib import SequenceMatcher
 from google.auth.transport.requests import Request
 from datetime import datetime, timedelta, timezone
+from cryptography.fernet import Fernet
 
 load_dotenv()
 
@@ -39,8 +41,10 @@ class User(db.Model):
     oauth_token = db.Column(db.Text, nullable=True)
     refresh_token = db.Column(db.Text, nullable=True)
     last_event = db.Column(db.JSON, nullable=True)
+    last_event_updated_at = db.Column(db.DateTime, nullable=True)
     calendars = db.Column(db.JSON, nullable=True)
     calendars_updated_at = db.Column(db.DateTime, nullable=True)
+
 
 
 class ProcessedMessage(db.Model):
@@ -54,11 +58,25 @@ with app.app_context():
 client = genai.Client(api_key=os.getenv("GEMINI_API_KEY"))
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 NOTION_URL = "https://www.notion.so/User-guide-for-Jekyll-35d2b89f0b3980faa54eccbd930609c0?source=copy_link"
+FERNET = Fernet(os.environ["TOKEN_ENCRYPTION_KEY"].encode())
+
+def encrypt_token(plaintext):
+    if plaintext is None:
+        return None
+    return FERNET.encrypt(plaintext.encode()).decode()
+
+def decrypt_token(ciphertext):
+    if ciphertext is None:
+        return None
+    return FERNET.decrypt(ciphertext.encode()).decode()
 
 # ── Gemini helpers ──────────────────────────────────────────
 def parse_gemini_json(response):
     raw = response.text.strip().replace("```json", "").replace("```", "")
-    return json.loads(raw)
+    try:
+        return json.loads(raw)
+    except json.JSONDecodeError:
+        return None
 
 def classify_intent(message):
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
@@ -120,7 +138,8 @@ Message: "{message}" """
         model="gemini-2.5-flash",
         contents=prompt
     )
-    return response.text.strip().upper()
+    raw = response.text.strip().upper()
+    return ''.join(c for c in raw if c.isalpha() or c == '_')
 
 
 def parse_event(message, intent, last_event=None):
@@ -278,17 +297,22 @@ Message: "{message}" """
     
 # ── Google Calendar helpers ─────────────────────────────────
 
+def set_pending(user, event_data):
+    user.last_event = event_data
+    user.last_event_updated_at = datetime.now(timezone.utc) if event_data else None
+    db.session.commit()
+
 def get_calendar_service(user):
     creds = Credentials(
-        token=user.oauth_token,
-        refresh_token=user.refresh_token,
+        token=decrypt_token(user.oauth_token),
+        refresh_token=decrypt_token(user.refresh_token),
         token_uri="https://oauth2.googleapis.com/token",
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
     )
     if creds.expired and creds.refresh_token:
         creds.refresh(Request())
-        user.oauth_token = creds.token
+        user.oauth_token = encrypt_token(creds.token)
         db.session.commit()
         
     return build("calendar", "v3", credentials=creds)
@@ -353,6 +377,10 @@ def check_conflict(user, service, new_event):
 def handle_create(user, text, phone, intent):
     event_data = parse_event(text, intent, last_event=user.last_event)
 
+    if event_data is None:
+        send_whatsapp(phone, "Sorry, I didn't catch that, can you repeat that?")
+        return
+    
     if not event_data.get("title"):
         send_whatsapp(phone, "What's the event?")
         return
@@ -369,14 +397,12 @@ def handle_create(user, text, phone, intent):
     now = datetime.now(ZoneInfo("America/Los_Angeles"))
 
     if event_dt < now:
-        user.last_event = {"needs_time_confirm": True, "new_event": event_data}
-        db.session.commit()
+        set_pending(user, {"needs_time_confirm": True, "new_event": event_data})
         send_whatsapp(phone, f"This is scheduled in the past.\n\n{event_data['title']} on {event_data['date']} at {event_data['time']}\n\nReply *Yes* to add it anyway, or send a correction.")
         return
 
     if now <= event_dt <= now + timedelta(minutes=5):
-        user.last_event = {"needs_time_confirm": True, "new_event": event_data}
-        db.session.commit()
+        set_pending(user, {"needs_time_confirm": True, "new_event": event_data})
         send_whatsapp(phone, f"This looks like it's happening right now.\n\n{event_data['title']} at {event_data['time']}\n\nReply *Yes* to add it anyway, or send a correction.")
         return
 
@@ -388,12 +414,11 @@ def handle_create(user, text, phone, intent):
         existing_start = existing["start"].get("dateTime", existing["start"].get("date"))
         dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
         existing_time = dt.strftime("%a %b %d at %I:%M %p")
-        user.last_event = {
+        set_pending(user, {
             "new_event": event_data,
             "conflict_event": {"title": existing["summary"], "time": existing_time},
             "needs_double_confirm": True
-        }
-        db.session.commit()
+        })
         send_whatsapp(phone, f"You already have {existing['summary']} scheduled for {existing_time}.\n\nDo you still want to add {event_data['title']} on {event_data['date']} at {event_data['time']}?\n\nReply *Yes* to confirm, or send a correction.")
         return
 
@@ -406,8 +431,7 @@ def handle_create(user, text, phone, intent):
     location_line = f"\n{event_data['location']}" if event_data.get("location") else "Location not set"
     calendar_line = f"Calendar: {calendar_name}"
 
-    user.last_event = event_data
-    db.session.commit()
+    set_pending(user, event_data)
 
     send_whatsapp(
         phone,
@@ -424,6 +448,13 @@ def handle_confirm(user, phone):
     if not user.last_event:
         send_whatsapp(phone, "Nothing pending — what would you like to add?")
         return
+    
+    if user.last_event_updated_at:
+        age = datetime.now(timezone.utc) - user.last_event_updated_at.replace(tzinfo=timezone.utc)
+        if age > timedelta(minutes=10):
+            set_pending(user, None)
+            send_whatsapp(phone, "Confirmation expired — start over?")
+            return
 
     event_data = user.last_event
     service = get_calendar_service(user)
@@ -433,8 +464,8 @@ def handle_confirm(user, phone):
             calendarId=event_data["calendar_id"],
             eventId=event_data["event_id"]
         ).execute()
-        user.last_event = None
-        db.session.commit()
+        set_pending(user, None)
+
         send_whatsapp(phone, f"Removed {event_data['title']}")
         return
 
@@ -452,8 +483,7 @@ def handle_confirm(user, phone):
         if event_data.get("location"):
             updated_body["location"] = event_data["location"]
         service.events().patch(calendarId=event_data.get("calendar_id", "primary"), eventId=event_data["event_id"], body=updated_body).execute()
-        user.last_event = None
-        db.session.commit()
+        set_pending(user, None)
         location_str = f" at {event_data['location']}" if event_data.get("location") else ""
         send_whatsapp(phone, f"Updated — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}")
         return
@@ -472,8 +502,8 @@ def handle_confirm(user, phone):
     if event_data.get("location"):
         event["location"] = event_data["location"]
     service.events().insert(calendarId=event_data.get("calendar_id", "primary"), body=event).execute()
-    user.last_event = None
-    db.session.commit()
+    set_pending(user, None)
+
     location_str = f" at {event_data['location']}" if event_data.get("location") else ""
     send_whatsapp(phone, f"Added — {event_data['title']}{location_str} on {event_data['date']} at {event_data['time']}")
 
@@ -500,6 +530,11 @@ def find_upcoming_event(user, service, keyword):
 
 def handle_delete(user, text, phone):
     delete_data = parse_delete(text)
+
+    if delete_data is None:
+        send_whatsapp(phone, "Sorry, I didn't catch that, what would you like me to cancel")
+        return
+    
     title = delete_data.get("title", "").lower()
     service = get_calendar_service(user)
     match = find_upcoming_event(user, service, title)
@@ -511,19 +546,23 @@ def handle_delete(user, text, phone):
     existing_start = match["start"].get("dateTime", match["start"].get("date"))
     dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
 
-    user.last_event = {
+    set_pending(user, {
         "needs_delete_confirm": True,
         "event_id": match["id"],
         "calendar_id": match["calendar_id"],
         "title": match["summary"],
         "time": dt.strftime("%a %b %d at %I:%M %p")
-    }
-    db.session.commit()
+    })
 
     send_whatsapp(phone, f"Remove *{match['summary']}* on {dt.strftime('%a %b %d at %I:%M %p')}?\n\nReply *Yes* to confirm.")
 
 def handle_edit(user, text, phone):
     edit_data = parse_edit(text, last_event=user.last_event)
+
+    if edit_data is None:
+        send_whatsapp(phone, "Sorry I didn't catch that, what would you like to change?")
+        return
+
     find = edit_data.get("find", "").lower()
     changes = edit_data.get("changes", {})
 
@@ -542,6 +581,7 @@ def handle_edit(user, text, phone):
     dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
     calendar_id, calendar_name = resolve_calendar_id(user, service, changes.get("calendar"))
 
+
     updated = {
         "event_id": match["id"],
         "title": changes.get("title") or match["summary"],
@@ -554,8 +594,7 @@ def handle_edit(user, text, phone):
         "calendar_name": calendar_name
     }
 
-    user.last_event = updated
-    db.session.commit()
+    set_pending(user, updated)
 
     change_lines = []
     if changes.get("title"):
@@ -627,6 +666,17 @@ def handle_list(user, phone, intent):
 
 # ── WhatsApp ────────────────────────────────────────────────
 
+def verify_whatsapp_signature(request):
+    signature = request.headers.get("X-Hub-Signature-256", "")
+    if not signature.startswith("sha256="):
+        return False
+    expected = hmac.new(
+        os.environ["WHATSAPP_APP_SECRET"].encode(),
+        request.get_data(),
+        hashlib.sha256
+    ).hexdigest()
+    return hmac.compare_digest(signature[7:], expected)
+
 def send_whatsapp(to, text):
     response = requests.post(
         f"https://graph.facebook.com/v18.0/{os.getenv('WHATSAPP_PHONE_NUMBER_ID')}/messages",
@@ -670,7 +720,6 @@ def auth(phone):
     session["code_verifier"] = code_verifier
     return render_template("auth.html", phone=phone, auth_url=auth_url)
 
-
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
     if request.method == "GET":
@@ -679,6 +728,9 @@ def webhook():
         challenge = request.args.get("hub.challenge")
         if mode == "subscribe" and token == os.getenv("WHATSAPP_VERIFY_TOKEN"):
             return challenge, 200
+        return "Forbidden", 403
+    
+    if not verify_whatsapp_signature(request):
         return "Forbidden", 403
 
     body = request.json
@@ -765,8 +817,8 @@ def oauth_callback():
     if not user:
         user = User(phone=phone)
         db.session.add(user)
-    user.oauth_token = token["access_token"]
-    user.refresh_token = token.get("refresh_token")
+    user.oauth_token = encrypt_token(token["access_token"])
+    user.refresh_token = encrypt_token(token.get("refresh_token"))
     db.session.commit()
     return render_template("success.html")
 
