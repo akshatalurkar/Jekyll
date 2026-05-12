@@ -18,6 +18,7 @@ from difflib import SequenceMatcher
 from google.auth.transport.requests import Request
 from datetime import datetime, timedelta, timezone
 from cryptography.fernet import Fernet
+from werkzeug.middleware.proxy_fix import ProxyFix
 
 load_dotenv()
 
@@ -29,6 +30,7 @@ if database_url.startswith("postgres://"):
     database_url = database_url.replace("postgres://", "postgresql://", 1)
 
 app = Flask(__name__)
+app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.secret_key = os.environ["FLASK_SECRET_KEY"]
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 db = SQLAlchemy(app)
@@ -103,6 +105,7 @@ LIST_TOMORROW - asking what's on the calendar tomorrow
 LIST_WEEK - asking what's coming up this week or in the next few days
 CONFIRM - confirming a pending action: "yes", "yep", "yeah", "correct", "sure", "ok", "do it"
 EDIT - modifying, rescheduling, or changing details of an existing event
+CANCEL - rejecting or canceling a pending action: "no", "nope", "never mind", "forget it", "stop", "don't"
 UNKNOWN - anything else
 
 EXAMPLES:
@@ -131,6 +134,15 @@ EXAMPLES:
 "reschedule coffee with jake to tomorrow" → EDIT
 "change my 3pm from X location to Y location" → EDIT
 "make the team sync 30 mins instead" → EDIT
+"no" → CANCEL
+"nope" → CANCEL
+"never mind" → CANCEL
+"forget it" → CANCEL
+"no, make it 4pm" → EDIT
+"no actually change it to friday" → EDIT
+"nope, add it to my work calendar" → EDIT
+"no make it 30 mins" → EDIT
+"never mind, do it for tomorrow instead" → EDIT
 "thanks" → UNKNOWN
 "lol" → UNKNOWN
 
@@ -445,6 +457,89 @@ def handle_create(user, text, phone, intent):
         f"Reply *Yes* to confirm, or send a correction."
     )
 
+def handle_correction(user, text, phone):
+    pending = user.last_event
+
+    if pending.get("needs_delete_confirm"):
+        send_whatsapp(phone, "Reply *Yes* to confirm the deletion, or *No* to cancel.")
+        return
+
+    if pending.get("needs_edit_confirm"):
+        intent = classify_intent(text)
+        correction = parse_event(text, intent, last_event=pending)
+
+        if correction is None:
+            send_whatsapp(phone, "Sorry, I didn't catch that — can you rephrase?")
+            return
+
+        merged = {**pending}
+        for key in ("title", "date", "time", "duration_minutes", "location", "calendar", "calendar_id", "calendar_name"):
+            if correction.get(key) is not None:
+                merged[key] = correction[key]
+
+        set_pending(user, merged)
+
+        location_str = f" at {merged['location']}" if merged.get("location") else ""
+        send_whatsapp(
+            phone,
+            f"Got it. Updated edit:\n\n"
+            f"*{merged['title']}*{location_str}\n"
+            f"{merged['date']} at {merged['time']}\n\n"
+            f"Reply *Yes* to confirm or send another change."
+        )
+        return
+
+    existing = pending.get("new_event") or pending
+
+    intent = classify_intent(text)
+    correction = parse_event(text, intent, last_event=existing)
+
+    if correction is None:
+        send_whatsapp(phone, "Sorry, I didn't catch that — can you rephrase?")
+        return
+
+    merged = {**existing}
+    for key in ("title", "date", "time", "duration_minutes", "location", "calendar", "calendar_id", "calendar_name"):
+        if correction.get(key) is not None:
+            merged[key] = correction[key]
+
+    duration = merged.get("duration_minutes") if merged.get("duration_minutes") is not None else DEFAULT_DURATION_MINUTES
+    duration_line = f"{duration} min (default)" if merged.get("duration_minutes") is None else f"{duration} min"
+    location_line = f"\n{merged['location']}" if merged.get("location") else "Location not set"
+    calendar_line = f"Calendar: {merged.get('calendar_name', 'Default')}"
+
+    if pending.get("needs_time_confirm") or pending.get("needs_double_confirm"):
+        set_pending(user, {"needs_time_confirm": True, "new_event": merged})
+    else:
+        set_pending(user, merged)
+
+    send_whatsapp(
+        phone,
+        f"Updated — here's what I'll add:\n\n"
+        f"*{merged['title']}*\n"
+        f"{merged['date']} at {merged['time']}\n"
+        f"{duration_line}\n"
+        f"{location_line}\n"
+        f"{calendar_line}\n\n"
+        f"Reply *Yes* to confirm, or send another correction."
+    )
+
+def handle_cancel(user, phone):
+    if not user.last_event:
+        send_whatsapp(phone, "Nothing pending — what would you like to do?")
+        return
+    
+    pending = user.last_event
+    if pending.get("needs_delete_confirm"):
+        msg = "OK, keeping it on your calendar. What's next?"
+    elif pending.get("needs_edit_confirm"):
+        msg = "OK, leaving it as-is. What's next?"
+    else:
+        msg = "OK, not adding it. What's next?"
+    
+    set_pending(user, None)
+    send_whatsapp(phone, msg)
+
 def handle_confirm(user, phone):
     if not user.last_event:
         send_whatsapp(phone, "Nothing pending — what would you like to add?")
@@ -454,7 +549,7 @@ def handle_confirm(user, phone):
         age = datetime.now(timezone.utc) - user.last_event_updated_at.replace(tzinfo=timezone.utc)
         if age > timedelta(minutes=10):
             set_pending(user, None)
-            send_whatsapp(phone, "Confirmation expired — start over?")
+            send_whatsapp(phone, "That timed out — what would you like to do?")
             return
 
     event_data = user.last_event
@@ -512,20 +607,27 @@ def find_upcoming_event(user, service, keyword):
     now = datetime.now(timezone.utc).isoformat()
     calendars = get_user_calendars(user, service)
 
+    keywords = [keyword]
+    words = keyword.split()
+    if len(words) > 1:
+        keywords.extend([" ".join(words[:i]) for i in range(len(words)-1, 0, -1)])
+
     for cal in calendars:
         events_result = service.events().list(
             calendarId=cal["id"],
             timeMin=now,
-            maxResults=10,
+            maxResults=20,
             singleEvents=True,
             orderBy="startTime"
         ).execute()
 
         for event in events_result.get("items", []):
-            if keyword in event.get("summary", "").lower():
-                event["calendar_id"] = cal["id"]
-                event["calendar_name"] = cal["name"]
-                return event
+            title = event.get("summary", "").lower()
+            for kw in keywords:
+                if kw in title:
+                    event["calendar_id"] = cal["id"]
+                    event["calendar_name"] = cal["name"]
+                    return event
 
     return None
 
@@ -624,46 +726,74 @@ def handle_list(user, phone, intent):
     service = get_calendar_service(user)
 
     if intent == "LIST_TODAY":
-        time_min = now.replace(hour=0, minute=0, second=0).isoformat()
-        time_max = now.replace(hour=23, minute=59, second=59).isoformat()
+        time_min = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        time_max = now.replace(hour=23, minute=59, second=59, microsecond=0)
         label = "today"
+        date_label = now.strftime("%A, %b %d")
     elif intent == "LIST_TOMORROW":
         tomorrow = now + timedelta(days=1)
-        time_min = tomorrow.replace(hour=0, minute=0, second=0).isoformat()
-        time_max = tomorrow.replace(hour=23, minute=59, second=59).isoformat()
+        time_min = tomorrow.replace(hour=0, minute=0, second=0, microsecond=0)
+        time_max = tomorrow.replace(hour=23, minute=59, second=59, microsecond=0)
         label = "tomorrow"
+        date_label = tomorrow.strftime("%A, %b %d")
     else:
-        time_min = now.isoformat()
-        time_max = (now + timedelta(days=7)).isoformat()
+        time_min = now
+        time_max = now + timedelta(days=7)
         label = "this week"
+        date_label = None
 
     calendars = get_user_calendars(user, service)
     all_events = []
 
     for cal in calendars:
-        events_result = service.events().list(
-            calendarId=cal["id"],
-            timeMin=time_min,
-            timeMax=time_max,
-            maxResults=5,
-            singleEvents=True,
-            orderBy="startTime"
-        ).execute()
-        all_events.extend(events_result.get("items", []))
+        try:
+            events_result = service.events().list(
+                calendarId=cal["id"],
+                timeMin=time_min.isoformat(),
+                timeMax=time_max.isoformat(),
+                maxResults=20,
+                singleEvents=True,
+                orderBy="startTime"
+            ).execute()
+            for event in events_result.get("items", []):
+                event["_calendar_name"] = cal["name"]
+                all_events.append(event)
+        except Exception:
+            continue
 
     if not all_events:
-        send_whatsapp(phone, f"Nothing on the calendar {label}.")
+        send_whatsapp(phone, f"Nothing on your calendar {label}. Free as a bird 🐦")
         return
 
-    all_events.sort(key=lambda e: e["start"].get("dateTime", e["start"].get("date")))
+    all_events.sort(key=lambda e: e["start"].get("dateTime", e["start"].get("date", "")))
 
-    lines = [f"Here's {label} on your calendar:"]
-    for e in all_events[:10]:
+    if date_label:
+        lines = [f"Here's {label} ({date_label}):"]
+    else:
+        lines = [f"Here's what's coming up this week:"]
+
+    current_day = None
+    for e in all_events[:15]:
         start = e["start"].get("dateTime", e["start"].get("date"))
-        dt = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
-        lines.append(f"• {e['summary']} — {dt.strftime('%a %b %d at %I:%M %p')}")
-    send_whatsapp(phone, "\n".join(lines))
+        is_all_day = "dateTime" not in e["start"]
 
+        if is_all_day:
+            dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=ZoneInfo("America/Los_Angeles"))
+            time_str = "All day"
+        else:
+            dt = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
+            time_str = dt.strftime("%I:%M %p").lstrip("0")
+
+        if intent == "LIST_WEEK":
+            day = dt.strftime("%A")
+            if day != current_day:
+                current_day = day
+                lines.append(f"\n*{day}*")
+
+        title = e.get("summary", "Untitled")
+        lines.append(f"• {title} — {time_str}")
+
+    send_whatsapp(phone, "\n".join(lines))
 
 # ── WhatsApp ────────────────────────────────────────────────
 
@@ -771,14 +901,20 @@ def webhook():
     try:
         intent = classify_intent(text)
 
-        if intent == "GREETING":
+        if intent == "CONFIRM":
+            handle_confirm(user, phone)
+
+        elif intent == "CANCEL":
+            handle_cancel(user, phone)
+
+        elif user.last_event and intent not in ("CONFIRM", "CANCEL", "GREETING", "UNKNOWN", "LIST_TODAY", "LIST_TOMORROW", "LIST_WEEK"):
+            handle_correction(user, text, phone)
+
+        elif intent == "GREETING":
             send_whatsapp(phone, "Hey! What would you like to schedule?")
 
         elif intent in ("CREATE_TODAY", "CREATE_TOMORROW", "CREATE_RELATIVE", "CREATE_SPECIFIC"):
             handle_create(user, text, phone, intent)
-
-        elif intent == "CONFIRM":
-            handle_confirm(user, phone)
 
         elif intent == "DELETE":
             handle_delete(user, text, phone)
