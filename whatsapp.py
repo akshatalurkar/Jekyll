@@ -292,7 +292,7 @@ OUTPUT SCHEMA:
 }}
 
 FIND: Short lowercase keyword(s) to search the calendar for the event.
-CHANGES: Only include fields the user explicitly wants to change. All others should be null.
+CHANGES: Only include fields the user explicitly wants to change. All others should remain. If the user wants to REMOVE a field (e.g. "clear the location", "remove the location"), use the string "REMOVE" as the value.
 
 EXAMPLES:
 "move my dentist to 4pm" → {{"find": "dentist", "changes": {{"time": "16:00"}}}}
@@ -457,7 +457,7 @@ def handle_create(user, text, phone, intent):
         f"Reply *Yes* to confirm, or send a correction."
     )
 
-def handle_correction(user, text, phone):
+def handle_correction(user, text, phone, intent):
     pending = user.last_event
 
     if pending.get("needs_delete_confirm"):
@@ -480,6 +480,7 @@ def handle_correction(user, text, phone):
         set_pending(user, merged)
 
         location_str = f" at {merged['location']}" if merged.get("location") else ""
+        duration = merged.get("duration_minutes") or DEFAULT_DURATION_MINUTES
         send_whatsapp(
             phone,
             f"Got it. Updated edit:\n\n"
@@ -570,13 +571,13 @@ def handle_confirm(user, phone):
 
     elif event_data.get("needs_edit_confirm"):
         start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M").replace(tzinfo=ZoneInfo("America/Los_Angeles"))
-        end = start + timedelta(minutes=event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES)
+        end = start + timedelta(minutes=event_data.get("duration_minutes") if event_data.get("duration_minutes") is not None else DEFAULT_DURATION_MINUTES)
         updated_body = {
             "summary": event_data["title"],
             "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
             "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
         }
-        if event_data.get("location"):
+        if event_data.get("location") is not None:
             updated_body["location"] = event_data["location"]
         service.events().patch(calendarId=event_data.get("calendar_id", "primary"), eventId=event_data["event_id"], body=updated_body).execute()
         set_pending(user, None)
@@ -589,7 +590,7 @@ def handle_confirm(user, phone):
         return
 
     start = datetime.strptime(f"{event_data['date']} {event_data['time']}", "%Y-%m-%d %H:%M")
-    end = start + timedelta(minutes=event_data.get("duration_minutes") or DEFAULT_DURATION_MINUTES)
+    end = start + timedelta(minutes=event_data.get("duration_minutes") if event_data.get("duration_minutes") is not None else DEFAULT_DURATION_MINUTES)
     event = {
         "summary": event_data["title"],
         "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
@@ -681,17 +682,23 @@ def handle_edit(user, text, phone):
         return
 
     existing_start = match["start"].get("dateTime", match["start"].get("date"))
-    dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
-    calendar_id, calendar_name = resolve_calendar_id(user, service, changes.get("calendar"))
+    existing_end = match["end"].get("dateTime", match["end"].get("date"))
+    start_dt = datetime.fromisoformat(existing_start.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
+    end_dt = datetime.fromisoformat(existing_end.replace("Z", "+00:00")).astimezone(ZoneInfo("America/Los_Angeles"))
+    existing_duration = int((end_dt - start_dt).total_seconds() / 60)
 
+    calendar_id = match["calendar_id"]
+    calendar_name = match.get("calendar_name", "Default")
+    if changes.get("calendar"):
+        calendar_id, calendar_name = resolve_calendar_id(user, service, changes["calendar"])
 
     updated = {
         "event_id": match["id"],
         "title": changes.get("title") or match["summary"],
-        "date": changes.get("date") or dt.strftime("%Y-%m-%d"),
-        "time": changes.get("time") or dt.strftime("%H:%M"),
-        "duration_minutes": changes.get("duration_minutes") or DEFAULT_DURATION_MINUTES,
-        "location": changes.get("location") or match.get("location"),
+        "date": changes.get("date") or start_dt.strftime("%Y-%m-%d"),
+        "time": changes.get("time") or start_dt.strftime("%H:%M"),
+        "duration_minutes": changes.get("duration_minutes") if changes.get("duration_minutes") is not None else existing_duration,
+        "location": "" if changes.get("location") == "REMOVE" else (changes.get("location") or match.get("location")),
         "needs_edit_confirm": True,
         "calendar_id": calendar_id,
         "calendar_name": calendar_name
@@ -703,11 +710,11 @@ def handle_edit(user, text, phone):
     if changes.get("title"):
         change_lines.append(f"Title: {match['summary']} → {changes['title']}")
     if changes.get("date"):
-        change_lines.append(f"Date: {dt.strftime('%Y-%m-%d')} → {changes['date']}")
+        change_lines.append(f"Date: {start_dt.strftime('%Y-%m-%d')} → {changes['date']}")
     if changes.get("time"):
-        change_lines.append(f"Time: {dt.strftime('%H:%M')} → {changes['time']}")
+        change_lines.append(f"Time: {start_dt.strftime('%H:%M')} → {changes['time']}")
     if changes.get("duration_minutes"):
-        change_lines.append(f"Duration: → {changes['duration_minutes']} min")
+        change_lines.append(f"Duration: {existing_duration} → {changes['duration_minutes']} min")
     if changes.get("location"):
         change_lines.append(f"Location: → {changes['location']}")
     if changes.get("calendar"):
