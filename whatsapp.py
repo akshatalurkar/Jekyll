@@ -5,6 +5,7 @@ import hashlib
 import base64
 import requests
 import hmac
+import traceback
 from flask import Flask, request, session, render_template
 from dotenv import load_dotenv
 from flask_sqlalchemy import SQLAlchemy
@@ -792,7 +793,7 @@ def webhook():
             send_whatsapp(phone, "Not sure what you mean. Try:\n• 'dentist Friday 3pm'\n• 'what's on today?'\n• 'cancel my dentist'")
 
     except Exception as e:
-        print(f"Error: {e}")
+        traceback.print_exc()
         send_whatsapp(phone, "Something went wrong — try again in a moment.")
 
     return "OK", 200
