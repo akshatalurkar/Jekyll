@@ -794,7 +794,7 @@ def webhook():
 
     except Exception as e:
         traceback.print_exc()
-    send_whatsapp(phone, "Something went wrong — try again in a moment.")
+        send_whatsapp(phone, "Something went wrong — try again in a moment.")
 
     return "OK", 200
 
