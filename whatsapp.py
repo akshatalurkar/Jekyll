@@ -120,11 +120,20 @@ def webhook():
     try:
         if state.is_stale(user):
             state.clear_pending(db, user)
-
         pending = state.get_pending(user)
-        action = parse.parse(text, pending)
+        lowered = text.strip().lower()
+        YES = {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "do it", "confirm", "correct", "y"}
+        NO = {"no", "nope", "never mind", "nevermind", "cancel", "stop", "forget it", "n"}
+        if pending and lowered in YES:
+            from models import CalendarAction
+            action = CalendarAction(action="confirm")
+        elif pending and lowered in NO:
+            from models import CalendarAction
+            action = CalendarAction(action="cancel")
+        else:
+            action = parse.parse(text, pending)
+
         reply = patch.dispatch(db, user, action)
-        send_whatsapp(phone, reply)
     except Exception:
         traceback.print_exc()
         send_whatsapp(phone, "Something went wrong. Try again in a moment.")

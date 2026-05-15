@@ -112,6 +112,7 @@ def parse(message: str, pending: dict | None = None) -> CalendarAction:
                 system_instruction=SYSTEM_PROMPT,
                 response_mime_type="application/json",
                 temperature=0.1,
+                thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
         raw = response.text.strip().replace("```json", "").replace("```", "")
