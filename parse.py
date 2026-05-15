@@ -1,3 +1,10 @@
+"""
+The only module that talks to Gemini.
+
+One call per inbound message. Pending state is passed in so Gemini
+can distinguish "new event" from "correction to pending event" from "yes".
+"""
+
 import json
 import os
 from datetime import datetime, timedelta
@@ -10,7 +17,7 @@ from models import CalendarAction
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-MODEL = "gemini-2.0-flash"  # cheap parsing tier; swap to flash if you see regressions
+MODEL = "gemini-2.5-flash-lite"  # cheap parsing tier; swap to flash if you see regressions
 TZ = ZoneInfo("America/Los_Angeles")
 
 SYSTEM_PROMPT = """You parse calendar messages into JSON for a WhatsApp calendar assistant. You do NOT chat, explain, translate, summarize, write code, or answer non-calendar questions.
@@ -107,7 +114,8 @@ def parse(message: str, pending: dict | None = None) -> CalendarAction:
         )
         raw = response.text.strip().replace("```json", "").replace("```", "")
         return CalendarAction(**json.loads(raw))
-    except Exception:
+    except Exception as e:
+        print(f"[parse error] {type(e).__name__}: {e}")
         return CalendarAction(
             action="clarify",
             clarification="Didn't catch that. Rephrase?",
