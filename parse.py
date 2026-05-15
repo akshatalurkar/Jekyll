@@ -54,6 +54,8 @@ TIME RULES:
 - "in 2 hours" / "in 30 mins" → compute from current time given in context.
 - Ambiguous bare hour ("at 8", "at 7"): gym/run/yoga/breakfast/standup→AM; dinner/drinks/bar/party/movie→PM; lunch=12:00; coffee=09:00; meeting/call/sync ≤7=PM, 8-11=AM.
 - If a time is given with no AM/PM and no event type hint, prefer the next upcoming hour (i.e. if now is 14:00 and user says "at 3", use 15:00 not 03:00).
+- "in 2 hours" / "in 30 mins" → compute from current time given in context.
+- Spelled-out durations: "thirty minutes"=30, "an hour"=60, "half an hour"=30, "an hour and a half"=90, "two hours"=120, "forty-five minutes"=45. Convert any written number to integer.
 
 TITLE RULES:
 - Clean, properly capitalized. Preserve context ("Coffee with Maya", not "Coffee").

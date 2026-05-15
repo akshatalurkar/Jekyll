@@ -155,9 +155,13 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
     
     if event_fields.calendar:
         service = calendar_ops.get_service(user)
-        cal_id, cal_name = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
-        merged["calendar_id"] = cal_id
-        merged["calendar_name"] = cal_name
+        resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
+        if resolved is None:
+            return formatted.clarify(
+                f"Couldn't find a calendar matching '{event_fields.calendar}'. "
+                f"Text 'what calendars do I have' to see your exact calendar names."
+            )
+        merged["calendar_id"], merged["calendar_name"] = resolved
 
     if kind == "create":
         service = calendar_ops.get_service(user)
