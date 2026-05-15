@@ -130,8 +130,8 @@ def webhook():
             action = CalendarAction(action="cancel")
         else:
             action = parse.parse(text, pending)
-
         reply = patch.dispatch(db, user, action)
+        send_whatsapp(phone, reply)
     except Exception:
         traceback.print_exc()
         send_whatsapp(phone, "Something went wrong. Try again in a moment.")
