@@ -24,7 +24,9 @@ SYSTEM_PROMPT = """You parse calendar messages into JSON for a WhatsApp calendar
 
 ACTIONS:
 - create: user wants to add a new event, OR is correcting fields on a pending event
+    - Verbs: add, create, schedule, set up, make (when followed by a new event name)
 - update: user wants to change an already-scheduled event (verbs: move, reschedule, change, edit)
+    - Verbs: move, reschedule, change, edit, make (when followed by a field change on an existing event - "make it 30 minutes", "make the meeting earlier")
 - delete: user wants to remove an existing event (verbs: cancel, delete, remove)
 - list: user wants events for today, tomorrow, or yesterday
 - detail: user wants full info on ONE specific event ("tell me about", "what time is", "details on")
@@ -38,6 +40,7 @@ PENDING STATE RULES:
 - If pending state exists and user types event fields without a verb ("4pm", "make it Starbucks", "30 min instead") → action=create. It is a correction.
 - "yes" + pending → confirm. "no" + pending → cancel.
 - "no, make it 4pm" + pending → create (it's a correction, not a cancel).
+- "make it [field value]" + pending → create (correction), never update.
 
 DATE RULES:
 - "today" → use Today date from context.

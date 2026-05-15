@@ -105,8 +105,6 @@ def _cancel(db, user, pending: dict | None) -> str:
 def _create(db, user, event_fields: EventFields | None) -> str:
     if not event_fields or not event_fields.title:
         return formatted.clarify("What's the event?")
-    if not event_fields.date or not event_fields.time:
-        return formatted.clarify("What date and time?")
 
     service = calendar_ops.get_service(user)
     resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
@@ -126,6 +124,10 @@ def _create(db, user, event_fields: EventFields | None) -> str:
         "calendar_id": cal_id,
         "calendar_name": cal_name,
     }
+
+    if not event_fields.date or not event_fields.time:
+        state.set_pending(db, user, {"kind": "create", "event": event, "warning": None})
+        return formatted.clarify("What date and time?")
 
     warning, conflicts = _detect_warning(user, service, event)
     payload = {"kind": "create", "event": event, "warning": warning}
