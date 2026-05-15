@@ -1,6 +1,6 @@
 import traceback
 from datetime import datetime, timedelta, timezone
-
+from models import CalendarAction
 from flask import request, session, render_template
 from requests_oauthlib import OAuth2Session
 import base64
@@ -125,10 +125,8 @@ def webhook():
         YES = {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "do it", "confirm", "correct", "y"}
         NO = {"no", "nope", "never mind", "nevermind", "cancel", "stop", "forget it", "n"}
         if pending and lowered in YES:
-            from models import CalendarAction
             action = CalendarAction(action="confirm")
         elif pending and lowered in NO:
-            from models import CalendarAction
             action = CalendarAction(action="cancel")
         else:
             action = parse.parse(text, pending)
