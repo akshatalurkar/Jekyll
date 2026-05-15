@@ -17,7 +17,7 @@ from models import CalendarAction
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-MODEL = "gemini-2.5-flash"  # cheap parsing tier; swap to flash if you see regressions
+MODEL = "gemini-2.5-flash"
 TZ = ZoneInfo("America/Los_Angeles")
 
 SYSTEM_PROMPT = """You parse calendar messages into JSON for a WhatsApp calendar assistant. You do NOT chat, explain, translate, summarize, write code, or answer non-calendar questions.
@@ -90,7 +90,6 @@ def _build_context(pending: dict | None) -> str:
         f"in 2h={in_2h}  in 30m={in_30m}",
     ]
     if pending:
-        # Strip noise from pending state before showing Gemini
         slim = {
             "kind": pending.get("kind"),
             "warning": pending.get("warning"),

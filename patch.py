@@ -127,24 +127,21 @@ def _create(db, user, event_fields: EventFields | None) -> str:
         "calendar_name": cal_name,
     }
 
-    warning, conflict = _detect_warning(user, service, event)
+    warning, conflicts = _detect_warning(user, service, event)
     payload = {"kind": "create", "event": event, "warning": warning}
-    if conflict:
-        payload["conflict"] = conflict
+    if conflicts:
+        payload["conflicts"] = conflicts
 
     state.set_pending(db, user, payload)
-    return formatted.create_confirmation(event, warning, conflict)
+    return formatted.create_confirmation(event, warning, conflicts)
 
 
 def _correction(db, user, pending: dict, event_fields: EventFields | None) -> str:
-    """Merge user's correction into the pending event and re-display."""
     if not event_fields:
         return formatted.clarify("What would you like to change?")
 
     kind = pending.get("kind")
-
     if kind == "delete":
-       
         return formatted.clarify("Reply *Yes* to confirm the deletion or *No* to cancel.")
 
     current = pending.get("event", {})
@@ -152,7 +149,6 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
     for k, v in event_fields.model_dump(exclude_none=True).items():
         merged[k] = v
 
-    
     if event_fields.calendar:
         service = calendar_ops.get_service(user)
         resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
@@ -162,18 +158,18 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
                 f"Text 'what calendars do I have' to see your exact calendar names."
             )
         merged["calendar_id"], merged["calendar_name"] = resolved
+    merged.pop("calendar", None)
 
     if kind == "create":
         service = calendar_ops.get_service(user)
-        warning, conflict = _detect_warning(user, service, merged)
+        warning, conflicts = _detect_warning(user, service, merged)
         payload = {"kind": "create", "event": merged, "warning": warning}
-        if conflict:
-            payload["conflict"] = conflict
+        if conflicts:
+            payload["conflicts"] = conflicts
         state.set_pending(db, user, payload)
-        return formatted.create_confirmation(merged, warning, conflict)
+        return formatted.create_confirmation(merged, warning, conflicts)
 
     if kind == "update":
-        
         payload = {
             "kind": "update",
             "event_id": pending["event_id"],
@@ -182,13 +178,19 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
         }
         state.set_pending(db, user, payload)
         diff_lines = _build_update_diff(pending["original"], merged)
-        return formatted.update_confirmation(pending["original"]["title"], diff_lines)
+        return formatted.update_confirmation(pending["original"]["title"], diff_lines, None)
 
     return formatted.error()
 
 
-def _detect_warning(user, service, event: dict) -> tuple[str | None, dict | None]:
-    """Returns (warning_kind, conflict_info)."""
+def _detect_warning(
+    user, service, event: dict, exclude_event_id: str | None = None
+) -> tuple[str | None, list[dict] | None]:
+    """
+    Returns (warning_kind, conflicts).
+    warning_kind: 'past' | 'now' | 'conflict' | None
+    conflicts: JSON-safe dicts ready for formatted.py, or None.
+    """
     now = datetime.now(TZ)
     event_dt = datetime.strptime(
         f"{event['date']} {event['time']}", "%Y-%m-%d %H:%M"
@@ -199,18 +201,32 @@ def _detect_warning(user, service, event: dict) -> tuple[str | None, dict | None
     if event_dt <= now + timedelta(minutes=5):
         return "now", None
 
-    conflicts = calendar_ops.find_conflicts(
-        user, service, event["date"], event["time"], event.get("duration_minutes")
+    raw = calendar_ops.find_conflicts(
+        user, service,
+        event["date"], event["time"], event.get("duration_minutes"),
+        exclude_event_id=exclude_event_id,
     )
-    if conflicts:
-        c = conflicts[0]
-        c_start = c["start"].get("dateTime") or c["start"].get("date")
-        c_dt = datetime.fromisoformat(c_start.replace("Z", "+00:00")).astimezone(TZ)
-        return "conflict", {
-            "title": c.get("summary", "(untitled)"),
-            "time": c_dt.strftime("%a %b %-d at %-I:%M%p").lower(),
-        }
-    return None, None
+    # All-day events on the same day don't block timed events.
+    blocking = [c for c in raw if not c["all_day"]]
+    if not blocking:
+        return None, None
+
+    out = []
+    for c in blocking:
+        same_day = c["start_dt"].date() == c["end_dt"].date()
+        start_s = c["start_dt"].strftime("%-I:%M%p").lower()
+        end_s = (
+            c["end_dt"].strftime("%-I:%M%p").lower()
+            if same_day
+            else c["end_dt"].strftime("%a %-I:%M%p").lower()
+        )
+        out.append({
+            "title": c["title"],
+            "calendar_name": c["calendar_name"],
+            "time_range": f"{start_s}–{end_s}",
+            "overlap": c["overlap"],
+        })
+    return "conflict", out
 
 
 def _execute_create(db, user, event: dict) -> str:
@@ -260,17 +276,20 @@ def _update(db, user, target_query: str | None, changes: EventFields | None) -> 
         new_event[k] = v
     new_event["calendar_id"] = new_cal_id
     new_event["calendar_name"] = new_cal_name
-
+    warning, conflicts = _detect_warning(user, service, new_event, exclude_event_id=match["id"])
     payload = {
         "kind": "update",
         "event_id": match["id"],
         "event": new_event,
         "original": original,
+        "warning": warning,
     }
+    if conflicts:
+        payload["conflicts"] = conflicts
     state.set_pending(db, user, payload)
 
     diff_lines = _build_update_diff(original, new_event)
-    return formatted.update_confirmation(original["title"], diff_lines)
+    return formatted.update_confirmation(original["title"], diff_lines, conflicts)
 
 
 def _build_update_diff(original: dict, new_event: dict) -> list[str]:

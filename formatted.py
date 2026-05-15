@@ -1,17 +1,7 @@
-"""
-Every string the user sees, built deterministically.
-Change the voice here; nowhere else.
-
-WhatsApp markdown: *bold*, _italic_, ~strike~, ```code```
-"""
-
 from datetime import datetime
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("America/Los_Angeles")
-
-
-# ── Date / time formatting ──────────────────────────────────
 
 def fmt_date(date_iso: str) -> str:
     """YYYY-MM-DD → 'today', 'tomorrow', 'yesterday', or 'Fri May 17'."""
@@ -40,22 +30,23 @@ def fmt_event_time_from_iso(iso_str: str) -> str:
     dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(TZ)
     return dt.strftime("%-I:%M%p").lower()
 
-
-# ── Create / correction confirmations ───────────────────────
-
 _WARNING_PREFIX = {
     "past": "⚠️ This is in the past.",
     "now":  "⚠️ This is happening right now.",
-    "conflict": None,  # built dynamically with conflict event info
+    "conflict": None,
 }
 
 
-def create_confirmation(event: dict, warning: str | None, conflict: dict | None = None) -> str:
+def create_confirmation(event: dict, warning: str | None, conflicts: list[dict] | None = None) -> str:
     lines = []
-    if warning == "conflict" and conflict:
-        lines.append(
-            f"⚠️ Conflicts with *{conflict['title']}* at {conflict['time']}"
-        )
+    if warning == "conflict" and conflicts:
+        if len(conflicts) == 1:
+            c = conflicts[0]
+            lines.append(f"⚠️ Conflicts with *{c['title']}* ({c['calendar_name']}) — {c['time_range']}")
+        else:
+            lines.append(f"⚠️ Overlaps {len(conflicts)} events:")
+            for c in conflicts:
+                lines.append(f"  • *{c['title']}* ({c['calendar_name']}) — {c['time_range']}")
     elif warning in _WARNING_PREFIX:
         lines.append(_WARNING_PREFIX[warning])
 
@@ -65,16 +56,9 @@ def create_confirmation(event: dict, warning: str | None, conflict: dict | None 
     lines.append(f"{fmt_date(event['date'])} at {fmt_time(event['time'])}")
 
     dur = event.get("duration_minutes")
-    if dur:
-        lines.append(f"{dur} min")
-    else:
-        lines.append("60 min (default)")
+    lines.append(f"{dur} min" if dur else "60 min (default)")
 
-    if event.get("location"):
-        lines.append(event["location"])
-    else:
-        lines.append("No location")
-
+    lines.append(event["location"] if event.get("location") else "No location")
     lines.append(f"Calendar: {event.get('calendar_name', 'Default')}")
     lines.append("")
     lines.append("Reply *Yes* to confirm, *No* to cancel, or send a correction.")
@@ -85,22 +69,26 @@ def create_success(event: dict) -> str:
     location = f" at {event['location']}" if event.get("location") else ""
     return f"✓ Added — *{event['title']}*{location} on {fmt_date(event['date'])} at {fmt_time(event['time'])}"
 
+def update_confirmation(original_title: str, diff_lines: list[str], conflicts: list[dict] | None = None) -> str:
+    lines = []
+    if conflicts:
+        if len(conflicts) == 1:
+            c = conflicts[0]
+            lines.append(f"⚠️ Conflicts with *{c['title']}* ({c['calendar_name']}) — {c['time_range']}\n")
+        else:
+            lines.append(f"⚠️ Overlaps {len(conflicts)} events:")
+            for c in conflicts:
+                lines.append(f"  • *{c['title']}* ({c['calendar_name']}) — {c['time_range']}")
+            lines.append("")
 
-# ── Update confirmations ────────────────────────────────────
-
-def update_confirmation(original_title: str, diff_lines: list[str]) -> str:
-    return (
-        f"Here's what I'll change for *{original_title}*:\n\n"
-        + "\n".join(diff_lines)
-        + "\n\nReply *Yes* to confirm, *No* to cancel, or send a correction."
-    )
+    lines.append(f"Here's what I'll change for *{original_title}*:\n")
+    lines.append("\n".join(diff_lines))
+    lines.append("\nReply *Yes* to confirm, *No* to cancel, or send a correction.")
+    return "\n".join(lines)
 
 
 def update_success(title: str) -> str:
     return f"✓ Updated — *{title}*"
-
-
-# ── Delete confirmation ─────────────────────────────────────
 
 def delete_confirmation(title: str, when: str) -> str:
     return (
@@ -112,15 +100,11 @@ def delete_confirmation(title: str, when: str) -> str:
 def delete_success(title: str) -> str:
     return f"✓ Removed — *{title}*"
 
-
-# ── List ────────────────────────────────────────────────────
-
 def list_grouped(label: str, date_label: str | None, events: list[dict]) -> str:
     if not events:
         when = f" {label}" if label else ""
         return f"Nothing scheduled{when}."
 
-    # Group by calendar name
     groups: dict[str, list[dict]] = {}
     for e in events:
         cal = e.get("_calendar_name", "Default")
@@ -147,9 +131,6 @@ def list_grouped(label: str, date_label: str | None, events: list[dict]) -> str:
 
 def list_out_of_scope() -> str:
     return "I can only show today, tomorrow, or yesterday."
-
-
-# ── Detail ──────────────────────────────────────────────────
 
 def event_detail(event: dict) -> str:
     start_str = event["start"].get("dateTime") or event["start"].get("date")
@@ -180,50 +161,32 @@ def event_detail(event: dict) -> str:
     lines.append(f"Calendar: {event.get('_calendar_name', 'Default')}")
     return "\n".join(lines)
 
-
-# ── Calendar list ───────────────────────────────────────────
-
 def calendar_names(names: list[str]) -> str:
     if not names:
         return "No calendars found."
     return "Your calendars:\n" + "\n".join(f"• {n}" for n in names)
 
-
-# ── Cancellation / confirmation outcomes ────────────────────
-
 def cancelled_create() -> str:
     return "OK, not adding it."
-
 
 def cancelled_update() -> str:
     return "OK, leaving it as-is."
 
-
 def cancelled_delete() -> str:
     return "OK, keeping it on your calendar."
-
 
 def nothing_pending() -> str:
     return "Nothing pending. What would you like to do?"
 
-
 def pending_timed_out() -> str:
     return "That timed out. What would you like to do?"
 
-
-# ── Fallbacks ───────────────────────────────────────────────
-
 def clarify(question: str | None) -> str:
     return question or "Need more info."
-
-
 def rejected() -> str:
     return "Calendar only."
 
-
 def not_found(keyword: str) -> str:
     return f"Couldn't find '{keyword}'."
-
-
 def error() -> str:
     return "Something went wrong. Try again."

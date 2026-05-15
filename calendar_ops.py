@@ -6,7 +6,6 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
-# Import shared infrastructure from core
 from core import encrypt_token, decrypt_token, db
 
 import os
@@ -14,9 +13,6 @@ import os
 TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_DURATION_MINUTES = 60
 CALENDAR_LIST_TTL_HOURS = 24
-
-
-# ── Auth / service ──────────────────────────────────────────
 
 def get_service(user):
     creds = Credentials(
@@ -31,9 +27,6 @@ def get_service(user):
         user.oauth_token = encrypt_token(creds.token)
         db.session.commit()
     return build("calendar", "v3", credentials=creds)
-
-
-# ── Calendar list (cached) ──────────────────────────────────
 
 def get_user_calendars(user, service):
     stale = (
@@ -72,29 +65,89 @@ def resolve_calendar(user, service, hint: str | None) -> tuple[str, str] | None:
         return best["id"], best["name"]
     return None
 
-
-# ── Event queries ───────────────────────────────────────────
-
 def _to_pacific(iso_str: str) -> datetime:
     return datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(TZ)
 
 
-def find_conflicts(user, service, date: str, time: str, duration_minutes: int | None) -> list[dict]:
-    start = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
-    end = start + timedelta(minutes=duration_minutes or DEFAULT_DURATION_MINUTES)
+def _classify_overlap(new_start, new_end, ev_start, ev_end) -> str:
+    """Shape of overlap between an existing event and the proposed window."""
+    if ev_start == new_start and ev_end == new_end:
+        return "exact"
+    if ev_start <= new_start and ev_end >= new_end:
+        return "contains"          # existing swallows the new one
+    if ev_start >= new_start and ev_end <= new_end:
+        return "contained"         # new swallows the existing one
+    if ev_start < new_start:
+        return "overlaps_start"    # existing started before, ends during new
+    return "overlaps_end"          # existing starts during new, ends after
 
-    conflicts = []
+
+def find_conflicts(
+    user,
+    service,
+    date: str,
+    time: str,
+    duration_minutes: int | None,
+    exclude_event_id: str | None = None,
+) -> list[dict]:
+    """
+    All events overlapping the proposed window across all calendars,
+    sorted by start time. Each entry:
+        {
+            "title": str,
+            "calendar_name": str,
+            "start_dt": datetime,   # Pacific
+            "end_dt": datetime,     # Pacific
+            "overlap": str,         # exact | contains | contained | overlaps_start | overlaps_end
+            "all_day": bool,
+        }
+
+    Filters: the event being updated (if exclude_event_id given),
+    cancelled events, and events marked 'transparent' (free in Google).
+    """
+    new_start = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
+    new_end = new_start + timedelta(minutes=duration_minutes or DEFAULT_DURATION_MINUTES)
+
+    conflicts: list[dict] = []
     for cal in get_user_calendars(user, service):
-        events = service.events().list(
-            calendarId=cal["id"],
-            timeMin=start.isoformat(),
-            timeMax=end.isoformat(),
-            singleEvents=True,
-            orderBy="startTime",
-        ).execute().get("items", [])
-        for e in events:
-            e["_calendar_name"] = cal["name"]
-            conflicts.append(e)
+        try:
+            items = service.events().list(
+                calendarId=cal["id"],
+                timeMin=new_start.isoformat(),
+                timeMax=new_end.isoformat(),
+                singleEvents=True,
+                orderBy="startTime",
+            ).execute().get("items", [])
+        except Exception:
+            continue
+
+        for e in items:
+            if exclude_event_id and e.get("id") == exclude_event_id:
+                continue
+            if e.get("status") == "cancelled":
+                continue
+            if e.get("transparency") == "transparent":
+                continue
+
+            dt_start = e["start"].get("dateTime")
+            all_day = dt_start is None
+            if all_day:
+                ev_start = datetime.strptime(e["start"]["date"], "%Y-%m-%d").replace(tzinfo=TZ)
+                ev_end = datetime.strptime(e["end"]["date"], "%Y-%m-%d").replace(tzinfo=TZ)
+            else:
+                ev_start = _to_pacific(dt_start)
+                ev_end = _to_pacific(e["end"]["dateTime"])
+
+            conflicts.append({
+                "title": e.get("summary", "(untitled)"),
+                "calendar_name": cal["name"],
+                "start_dt": ev_start,
+                "end_dt": ev_end,
+                "overlap": _classify_overlap(new_start, new_end, ev_start, ev_end),
+                "all_day": all_day,
+            })
+
+    conflicts.sort(key=lambda c: c["start_dt"])
     return conflicts
 
 
@@ -150,9 +203,6 @@ def list_events_for_day(user, service, day_iso: str) -> list[dict]:
             continue
     return out
 
-
-# ── Event mutations ─────────────────────────────────────────
-
 def insert_event(service, calendar_id: str, title: str, date: str, time: str,
                  duration_minutes: int | None, location: str | None) -> dict:
     start = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
@@ -173,9 +223,8 @@ def patch_event(service, calendar_id: str, event_id: str, fields: dict) -> dict:
     if "title" in fields:
         body["summary"] = fields["title"]
 
-    # Date/time/duration are coupled - if any one changes, recompute start+end together
     if any(k in fields for k in ("date", "time", "duration_minutes")):
-        # Caller is expected to supply the resolved date+time+duration_minutes
+
         d = fields["date"]
         t = fields["time"]
         dur = fields.get("duration_minutes") or DEFAULT_DURATION_MINUTES
@@ -185,7 +234,7 @@ def patch_event(service, calendar_id: str, event_id: str, fields: dict) -> dict:
         body["end"] = {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"}
 
     if "location" in fields:
-        body["location"] = fields["location"]  # empty string clears it
+        body["location"] = fields["location"]  
 
     return service.events().patch(calendarId=calendar_id, eventId=event_id, body=body).execute()
 

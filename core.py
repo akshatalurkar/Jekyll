@@ -1,8 +1,3 @@
-"""
-Shared infrastructure. Everything else imports from here.
-Keeps circular imports impossible: core has no local imports.
-"""
-
 import base64
 import hashlib
 import hmac
@@ -21,8 +16,6 @@ load_dotenv()
 
 if os.getenv("FLASK_ENV") == "development":
     os.environ["OAUTHLIB_INSECURE_TRANSPORT"] = "1"
-
-# ── App + DB ────────────────────────────────────────────────
 
 database_url = os.getenv("DATABASE_URL", "sqlite:///users.db")
 if database_url.startswith("postgres://"):
@@ -44,8 +37,6 @@ app.secret_key = os.environ["FLASK_SECRET_KEY"]
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
 db = SQLAlchemy(app)
 
-# ── Models ──────────────────────────────────────────────────
-
 class User(db.Model):
     id = db.Column(db.Integer, primary_key=True)
     phone = db.Column(db.String(20), unique=True, nullable=False)
@@ -66,8 +57,6 @@ class ProcessedMessage(db.Model):
 with app.app_context():
     db.create_all()
 
-# ── Token encryption ────────────────────────────────────────
-
 FERNET = Fernet(os.environ["TOKEN_ENCRYPTION_KEY"].encode())
 
 def encrypt_token(plaintext: str | None) -> str | None:
@@ -80,12 +69,8 @@ def decrypt_token(ciphertext: str | None) -> str | None:
         return None
     return FERNET.decrypt(ciphertext.encode()).decode()
 
-# ── Constants ───────────────────────────────────────────────
-
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 NOTION_URL = "https://www.notion.so/User-guide-for-Jekyll-35d2b89f0b3980faa54eccbd930609c0?source=copy_link"
-
-# ── WhatsApp helpers ────────────────────────────────────────
 
 def send_whatsapp(to: str, text: str) -> dict:
     response = requests.post(
@@ -102,7 +87,6 @@ def send_whatsapp(to: str, text: str) -> dict:
         },
     )
     return response.json()
-
 
 def verify_whatsapp_signature(req) -> bool:
     signature = req.headers.get("X-Hub-Signature-256", "")

@@ -18,9 +18,6 @@ import state
 import parse
 import patch
 
-
-# ── OAuth / onboarding routes ───────────────────────────────
-
 @app.route("/auth/<phone>")
 def auth(phone):
     code_verifier = secrets.token_urlsafe(64)
