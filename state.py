@@ -1,21 +1,3 @@
-"""
-Pending-state helpers. Backs onto User.last_event in the DB.
-
-Pending state shape:
-{
-  "kind": "create" | "update" | "delete",
-  "warning": "past" | "now" | "conflict" | null,    # only for create
-  "event": {                                         # the event being created/updated
-    "title", "date", "time", "duration_minutes",
-    "location", "calendar_id", "calendar_name",
-    ...
-  },
-  "event_id": str,            # for update/delete: the Google Calendar event ID
-  "original": {...},          # for update/delete: snapshot of original event for diff display
-  "conflict": {...},          # for create with warning=conflict: brief info on the conflict
-}
-"""
-
 from datetime import datetime, timedelta, timezone
 from core import db
 

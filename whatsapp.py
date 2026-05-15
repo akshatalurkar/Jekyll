@@ -1,9 +1,3 @@
-"""
-Jekyll entry point.
-Registers all routes on the Flask app from core.py.
-Run this file directly: python whatsapp.py
-"""
-
 import traceback
 from datetime import datetime, timedelta, timezone
 

@@ -28,6 +28,16 @@ database_url = os.getenv("DATABASE_URL", "sqlite:///users.db")
 if database_url.startswith("postgres://"):
     database_url = database_url.replace("postgres://", "postgresql://", 1)
 
+REQUIRED_ENV = [
+    "FLASK_SECRET_KEY", "TOKEN_ENCRYPTION_KEY", "GEMINI_API_KEY",
+    "GOOGLE_CLIENT_ID", "GOOGLE_CLIENT_SECRET",
+    "WHATSAPP_TOKEN", "WHATSAPP_PHONE_NUMBER_ID",
+    "WHATSAPP_APP_SECRET", "WHATSAPP_VERIFY_TOKEN",
+]
+missing = [k for k in REQUIRED_ENV if not os.getenv(k)]
+if missing:
+    raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
+
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.secret_key = os.environ["FLASK_SECRET_KEY"]
