@@ -1,15 +1,3 @@
-"""
-All Google Calendar interactions live here.
-
-These are mostly the same functions you already had in app.py, just
-extracted and tightened. Import this from dispatch.py instead of
-keeping Calendar API calls inline with the routing logic.
-
-You need to wire encrypt_token / decrypt_token from your existing app
-since they share Fernet state. Easiest: keep them in app.py and pass
-them in, or import them here from a tokens module.
-"""
-
 from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from zoneinfo import ZoneInfo
