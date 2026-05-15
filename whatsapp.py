@@ -31,8 +31,7 @@ def auth(phone):
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         redirect_uri=f"{BASE_URL}/oauth/callback",
         scope=[
-            "https://www.googleapis.com/auth/calendar.events",
-            "https://www.googleapis.com/auth/calendar.readonly",
+            "https://www.googleapis.com/auth/calendar"
         ],
     )
     auth_url, oauth_state = oauth.authorization_url(
