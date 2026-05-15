@@ -24,12 +24,7 @@ from models import CalendarAction, EventFields
 
 TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_DURATION_MINUTES = 60
-LIST_SCOPE_DAYS = 1   # today, tomorrow, yesterday only
-
-
-# ════════════════════════════════════════════════════════════
-# ENTRY POINT
-# ════════════════════════════════════════════════════════════
+LIST_SCOPE_DAYS = 1   
 
 def dispatch(db, user, action: CalendarAction) -> str:
     pending = state.get_pending(user)
@@ -46,7 +41,6 @@ def dispatch(db, user, action: CalendarAction) -> str:
     if action.action == "cancel":
         return _cancel(db, user, pending)
 
-    # If pending exists and user is sending event fields, it's a correction
     if pending and action.action == "create":
         return _correction(db, user, pending, action.event)
 
@@ -70,10 +64,7 @@ def dispatch(db, user, action: CalendarAction) -> str:
 
     return formatted.error()
 
-
-# ════════════════════════════════════════════════════════════
-# CONFIRM / CANCEL
-# ════════════════════════════════════════════════════════════
+#confirm
 
 def _confirm(db, user, pending: dict | None) -> str:
     if not pending:
@@ -109,10 +100,7 @@ def _cancel(db, user, pending: dict | None) -> str:
         return formatted.cancelled_update()
     return formatted.cancelled_create()
 
-
-# ════════════════════════════════════════════════════════════
-# CREATE
-# ════════════════════════════════════════════════════════════
+#create
 
 def _create(db, user, event_fields: EventFields | None) -> str:
     if not event_fields or not event_fields.title:
@@ -121,7 +109,13 @@ def _create(db, user, event_fields: EventFields | None) -> str:
         return formatted.clarify("What date and time?")
 
     service = calendar_ops.get_service(user)
-    cal_id, cal_name = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
+    resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
+    if resolved is None:
+        return formatted.clarify(
+            f"Couldn't find a calendar matching '{event_fields.calendar}'. "
+            f"Text 'what calendars do I have' to see your exact calendar names."
+        )
+    cal_id, cal_name = resolved
 
     event = {
         "title": event_fields.title,
@@ -150,7 +144,7 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
     kind = pending.get("kind")
 
     if kind == "delete":
-        # Deletes don't take field corrections - just yes/no
+       
         return formatted.clarify("Reply *Yes* to confirm the deletion or *No* to cancel.")
 
     current = pending.get("event", {})
@@ -158,7 +152,7 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
     for k, v in event_fields.model_dump(exclude_none=True).items():
         merged[k] = v
 
-    # If calendar changed, re-resolve
+    
     if event_fields.calendar:
         service = calendar_ops.get_service(user)
         cal_id, cal_name = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
@@ -175,7 +169,7 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
         return formatted.create_confirmation(merged, warning, conflict)
 
     if kind == "update":
-        # Update: merged event becomes the new desired state; pending keeps event_id + original
+        
         payload = {
             "kind": "update",
             "event_id": pending["event_id"],
@@ -229,10 +223,7 @@ def _execute_create(db, user, event: dict) -> str:
     state.clear_pending(db, user)
     return formatted.create_success(event)
 
-
-# ════════════════════════════════════════════════════════════
-# UPDATE
-# ════════════════════════════════════════════════════════════
+# update
 
 def _update(db, user, target_query: str | None, changes: EventFields | None) -> str:
     if not target_query:
@@ -245,16 +236,19 @@ def _update(db, user, target_query: str | None, changes: EventFields | None) -> 
     if not match:
         return formatted.not_found(target_query)
 
-    # Snapshot original to preserve all unchanged fields
     original = _event_to_dict(match)
 
-    # Resolve calendar if user wants to move it
     new_cal_id = original["calendar_id"]
     new_cal_name = original["calendar_name"]
     if changes.calendar:
-        new_cal_id, new_cal_name = calendar_ops.resolve_calendar(user, service, changes.calendar)
+        resolved = calendar_ops.resolve_calendar(user, service, changes.calendar)
+        if resolved is None:
+            return formatted.clarify(
+                f"Couldn't find a calendar matching '{changes.calendar}'. "
+                f"Text 'what calendars do I have' to see your exact calendar names."
+            )
+        new_cal_id, new_cal_name = resolved
 
-    # Build the new desired event state - start from original, overlay changes
     new_event = {**original}
     for k, v in changes.model_dump(exclude_none=True).items():
         if k == "calendar":
@@ -300,7 +294,6 @@ def _execute_update(db, user, pending: dict) -> str:
     new_event = pending["event"]
     original = pending["original"]
 
-    # If calendar changed, we have to delete + recreate (Google won't move events between calendars)
     if new_event["calendar_id"] != original["calendar_id"]:
         calendar_ops.delete_event(service, original["calendar_id"], pending["event_id"])
         calendar_ops.insert_event(
@@ -313,7 +306,6 @@ def _execute_update(db, user, pending: dict) -> str:
             location=new_event.get("location"),
         )
     else:
-        # Patch in place. Pass the fields that changed.
         fields_to_patch = {}
         if new_event["title"] != original["title"]:
             fields_to_patch["title"] = new_event["title"]
@@ -332,10 +324,7 @@ def _execute_update(db, user, pending: dict) -> str:
     state.clear_pending(db, user)
     return formatted.update_success(new_event["title"])
 
-
-# ════════════════════════════════════════════════════════════
-# DELETE
-# ════════════════════════════════════════════════════════════
+#delete
 
 def _delete(db, user, target_query: str | None) -> str:
     if not target_query:
@@ -367,10 +356,7 @@ def _execute_delete(db, user, pending: dict) -> str:
     state.clear_pending(db, user)
     return formatted.delete_success(pending["title"])
 
-
-# ════════════════════════════════════════════════════════════
-# LIST
-# ════════════════════════════════════════════════════════════
+#list
 
 def _list(user, list_date: str | None) -> str:
     if not list_date:
@@ -392,10 +378,7 @@ def _list(user, list_date: str | None) -> str:
 
     return formatted.list_grouped(label, date_label, events)
 
-
-# ════════════════════════════════════════════════════════════
-# DETAIL
-# ════════════════════════════════════════════════════════════
+#detail
 
 def _detail(user, target_query: str | None) -> str:
     if not target_query:
@@ -407,20 +390,14 @@ def _detail(user, target_query: str | None) -> str:
         return formatted.not_found(target_query)
     return formatted.event_detail(match)
 
-
-# ════════════════════════════════════════════════════════════
-# LIST CALENDARS
-# ════════════════════════════════════════════════════════════
+#list calendars
 
 def _list_calendars(user) -> str:
     service = calendar_ops.get_service(user)
     calendars = calendar_ops.get_user_calendars(user, service)
     return formatted.calendar_names([c["name"] for c in calendars])
 
-
-# ════════════════════════════════════════════════════════════
-# Helpers
-# ════════════════════════════════════════════════════════════
+#helper method
 
 def _event_to_dict(gcal_event: dict) -> dict:
     """Convert a Google Calendar event into our internal event dict."""

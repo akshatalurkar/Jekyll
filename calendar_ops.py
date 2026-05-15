@@ -60,8 +60,8 @@ def _calendar_similarity(hint: str, name: str) -> float:
     return SequenceMatcher(None, h, n).ratio()
 
 
-def resolve_calendar(user, service, hint: str | None) -> tuple[str, str]:
-    """Returns (calendar_id, calendar_name). Falls back to primary."""
+def resolve_calendar(user, service, hint: str | None) -> tuple[str, str] | None:
+    """Returns (calendar_id, calendar_name) or None if hint given but no match found."""
     if not hint:
         return "primary", "Default"
     calendars = get_user_calendars(user, service)
@@ -70,7 +70,7 @@ def resolve_calendar(user, service, hint: str | None) -> tuple[str, str]:
     best = max(calendars, key=lambda c: _calendar_similarity(hint, c["name"]))
     if _calendar_similarity(hint, best["name"]) >= 0.6:
         return best["id"], best["name"]
-    return "primary", "Default"
+    return None
 
 
 # ── Event queries ───────────────────────────────────────────
