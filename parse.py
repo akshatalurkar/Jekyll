@@ -1,10 +1,3 @@
-"""
-The only module that talks to Gemini.
-
-One call per inbound message. Pending state is passed in so Gemini
-can distinguish "new event" from "correction to pending event" from "yes".
-"""
-
 import json
 import os
 from datetime import datetime, timedelta
@@ -17,7 +10,7 @@ from models import CalendarAction
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
-MODEL = "gemini-2.5-flash-lite"  # cheap parsing tier; swap to flash if you see regressions
+MODEL = "gemini-2.0-flash"  # cheap parsing tier; swap to flash if you see regressions
 TZ = ZoneInfo("America/Los_Angeles")
 
 SYSTEM_PROMPT = """You parse calendar messages into JSON for a WhatsApp calendar assistant. You do NOT chat, explain, translate, summarize, write code, or answer non-calendar questions.
@@ -39,11 +32,21 @@ PENDING STATE RULES:
 - "yes" + pending → confirm. "no" + pending → cancel.
 - "no, make it 4pm" + pending → create (it's a correction, not a cancel).
 
+DATE RULES:
+- "today" → use Today date from context.
+- "tomorrow" → use Tomorrow date from context.
+- "yesterday" → use Yesterday date from context.
+- Day of week ("Friday", "next Monday") → compute from Today date in context.
+- "in 2 days", "in a week" → compute from Today date.
+- Specific date ("May 20", "5/20") → resolve against current year from context.
+- If the user says "today" or gives a time with no date, always use Today date. Never return null for date when the user said "today".
+
 TIME RULES:
 - 24-hour HH:MM.
 - "morning"=09:00, "afternoon"=14:00, "evening"=18:00, "night"=20:00, "noon"=12:00, "midnight"=00:00, "eod"=17:00.
 - "in 2 hours" / "in 30 mins" → compute from current time given in context.
 - Ambiguous bare hour ("at 8", "at 7"): gym/run/yoga/breakfast/standup→AM; dinner/drinks/bar/party/movie→PM; lunch=12:00; coffee=09:00; meeting/call/sync ≤7=PM, 8-11=AM.
+- If a time is given with no AM/PM and no event type hint, prefer the next upcoming hour (i.e. if now is 14:00 and user says "at 3", use 15:00 not 03:00).
 
 TITLE RULES:
 - Clean, properly capitalized. Preserve context ("Coffee with Maya", not "Coffee").
