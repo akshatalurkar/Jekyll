@@ -74,12 +74,12 @@ def _classify_overlap(new_start, new_end, ev_start, ev_end) -> str:
     if ev_start == new_start and ev_end == new_end:
         return "exact"
     if ev_start <= new_start and ev_end >= new_end:
-        return "contains"          # existing swallows the new one
+        return "contains"         
     if ev_start >= new_start and ev_end <= new_end:
-        return "contained"         # new swallows the existing one
+        return "contained"         
     if ev_start < new_start:
-        return "overlaps_start"    # existing started before, ends during new
-    return "overlaps_end"          # existing starts during new, ends after
+        return "overlaps_start"   
+    return "overlaps_end"         
 
 
 def find_conflicts(

@@ -1,10 +1,3 @@
-"""
-The only module that talks to Gemini.
-
-One call per inbound message. Pending state is passed in so Gemini
-can distinguish "new event" from "correction to pending event" from "yes".
-"""
-
 import json
 import os
 from datetime import datetime, timedelta

@@ -1,19 +1,3 @@
-"""
-The orchestration brain.
-
-Every action from parser.py routes through dispatch(). State for
-pending creates/updates/deletes lives in the DB (User.last_event).
-
-Design:
-- Universal actions (reject, clarify, confirm, cancel) handled first.
-- 'create' with pending state present = correction. Merge and re-display.
-- 'create' with no pending = fresh create. Detect past/now/conflict, set pending, ask for confirm.
-- 'update' = find event, set pending with diff, ask for confirm.
-- 'delete' = find event, set pending with details, ask for confirm.
-- 'list' = bound to today/tomorrow/yesterday; reject otherwise.
-- 'detail' = find event in next 7 days, return full info.
-"""
-
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 

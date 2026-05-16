@@ -1,9 +1,3 @@
-"""
-Schema for everything Gemini is allowed to return.
-Confidence is intentionally absent: the action enum + clarify path +
-pending-state confirmation flow handles uncertainty already.
-"""
-
 from pydantic import BaseModel
 from typing import Literal, Optional
 

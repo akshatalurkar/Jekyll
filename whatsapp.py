@@ -46,7 +46,6 @@ def auth(phone):
     session["code_verifier"] = code_verifier
     return render_template("auth.html", phone=phone, auth_url=auth_url)
 
-
 @app.route("/oauth/callback")
 def oauth_callback():
     phone = session.get("phone")
@@ -70,9 +69,6 @@ def oauth_callback():
     user.refresh_token = encrypt_token(token.get("refresh_token"))
     db.session.commit()
     return render_template("success.html")
-
-
-# ── Webhook ─────────────────────────────────────────────────
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -115,7 +111,6 @@ def webhook():
             f"Full guide: {NOTION_URL}",
         )
         return "OK", 200
-
     try:
         if state.is_stale(user):
             state.clear_pending(db, user)
@@ -140,7 +135,6 @@ def webhook():
         send_whatsapp(phone, "Something went wrong. Try again in a moment.")
 
     return "OK", 200
-
 
 if __name__ == "__main__":
     app.run(port=int(os.getenv("PORT", 8001)))
