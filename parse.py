@@ -60,7 +60,12 @@ TITLE RULES:
 FIELD RULES:
 - duration_minutes: ONLY if user gives one. Null otherwise.
 - location: ONLY if explicit. Never infer. To clear an existing location on update, use "".
-- calendar: ONLY if explicit ("on my work calendar"). Never infer.
+- calendar: ONLY if explicit. Recognize all of these as the user specifying a calendar:
+    - "on my work calendar" / "to my Testing Jekyll calendar"
+    - "set the calendar to X" / "change the calendar to X"
+    - "use my X calendar" / "put it on X"
+    - "move it to X calendar" (during create correction) / "add it to X"
+  Extract just the calendar name (e.g. "work", "Testing Jekyll"), not the surrounding verbs. Never infer a calendar from context.
 
 PER ACTION:
 - create → fill `event` with whatever fields the user provided.
