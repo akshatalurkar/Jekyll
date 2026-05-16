@@ -72,6 +72,12 @@ def decrypt_token(ciphertext: str | None) -> str | None:
 BASE_URL = os.getenv("BASE_URL", "http://localhost:8001")
 NOTION_URL = "https://www.notion.so/User-guide-for-Jekyll-35d2b89f0b3980faa54eccbd930609c0?source=copy_link"
 
+def normalize_phone(phone: str) -> str:
+    phone = phone.strip().replace(" ", "").replace("-", "")
+    if not phone.startswith("+"):
+        phone = "+" + phone
+    return phone
+
 def send_whatsapp(to: str, text: str) -> dict:
     response = requests.post(
         f"https://graph.facebook.com/v18.0/{os.getenv('WHATSAPP_PHONE_NUMBER_ID')}/messages",

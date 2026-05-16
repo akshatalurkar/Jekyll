@@ -8,10 +8,12 @@ import hashlib
 import secrets
 import os
 
+TEST_MODE = os.getenv("JEKYLL_TEST_MODE") == "1"
+
 from core import (
     app, db, User, ProcessedMessage,
     send_whatsapp, verify_whatsapp_signature,
-    encrypt_token, decrypt_token,
+    encrypt_token, decrypt_token, normalize_phone,
     BASE_URL, NOTION_URL,
 )
 import state
@@ -20,6 +22,7 @@ import patch
 
 @app.route("/auth/<phone>")
 def auth(phone):
+    phone = normalize_phone(phone)
     code_verifier = secrets.token_urlsafe(64)
     code_challenge = base64.urlsafe_b64encode(
         hashlib.sha256(code_verifier.encode()).digest()
@@ -87,9 +90,7 @@ def webhook():
     body = request.json
     try:
         msg = body["entry"][0]["changes"][0]["value"]["messages"][0]
-        phone = msg["from"]
-        if not phone.startswith("+"):
-            phone = "+" + phone
+        phone = normalize_phone(msg["from"])
         text = msg["text"]["body"].strip()
         message_id = msg["id"]
     except (KeyError, IndexError, TypeError):
@@ -103,6 +104,7 @@ def webhook():
     db.session.commit()
 
     user = User.query.filter_by(phone=phone).first()
+    
     if not user or not user.oauth_token:
         send_whatsapp(
             phone,
@@ -128,7 +130,11 @@ def webhook():
         else:
             action = parse.parse(text, pending)
         reply = patch.dispatch(db, user, action)
-        send_whatsapp(phone, reply)
+        if TEST_MODE:
+            return reply, 200
+        else:
+            send_whatsapp(user.phone, reply)
+            return "", 200
     except Exception:
         traceback.print_exc()
         send_whatsapp(phone, "Something went wrong. Try again in a moment.")

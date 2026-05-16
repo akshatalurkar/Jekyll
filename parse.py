@@ -74,7 +74,7 @@ PER ACTION:
 - update → `target_query` = search keyword for the event. `event` = ONLY the fields that change.
 - delete → `target_query` = search keyword.
 - detail → `target_query` = search keyword.
-- list → `list_date` = YYYY-MM-DD for the day they asked about.
+- list → `list_date` = YYYY-MM-DD for the SPECIFIC day they asked about. If they name any day (Friday, Monday, May 20), resolve it to that exact date — never substitute today's date even if it happens to be that day. If they say a vague range ("next week", "this weekend", "the rest of the month"), set `list_date` to null.
 
 JSON only. No prose, no markdown fences."""
 
