@@ -18,7 +18,7 @@ SYSTEM_PROMPT = """You parse calendar messages into JSON for a WhatsApp calendar
 ACTIONS:
 - create: user wants to add a new event, OR is correcting fields on a pending event
     - Verbs: add, create, schedule, set up, make (when followed by a new event name)
-- update: user wants to change an already-scheduled event (verbs: move, reschedule, change, edit)
+- update: user wants to change an already-scheduled event
     - Verbs: move, reschedule, change, edit, make (when followed by a field change on an existing event - "make it 30 minutes", "make the meeting earlier")
 - delete: user wants to remove an existing event (verbs: cancel, delete, remove)
 - list: user wants events for today, tomorrow, or yesterday
@@ -31,6 +31,7 @@ ACTIONS:
 
 PENDING STATE RULES:
 - If pending state exists and user types event fields without a verb ("4pm", "make it Starbucks", "30 min instead") → action=create. It is a correction.
+- A correction can change ANY field, including the calendar and the reminder. "put it on my work calendar", "add it to Testing Jekyll", "set the calendar to X", "remind me 15 min before" → action=create with that single field filled in `event`.
 - "yes" + pending → confirm. "no" + pending → cancel.
 - "no, make it 4pm" + pending → create (it's a correction, not a cancel).
 - "make it [field value]" + pending → create (correction), never update.
@@ -50,7 +51,6 @@ TIME RULES:
 - "in 2 hours" / "in 30 mins" → compute from current time given in context.
 - Ambiguous bare hour ("at 8", "at 7"): gym/run/yoga/breakfast/standup→AM; dinner/drinks/bar/party/movie→PM; lunch=12:00; coffee=09:00; meeting/call/sync ≤7=PM, 8-11=AM.
 - If a time is given with no AM/PM and no event type hint, prefer the next upcoming hour (i.e. if now is 14:00 and user says "at 3", use 15:00 not 03:00).
-- "in 2 hours" / "in 30 mins" → compute from current time given in context.
 - Spelled-out durations: "thirty minutes"=30, "an hour"=60, "half an hour"=30, "an hour and a half"=90, "two hours"=120, "forty-five minutes"=45. Convert any written number to integer.
 
 TITLE RULES:
@@ -60,12 +60,13 @@ TITLE RULES:
 FIELD RULES:
 - duration_minutes: ONLY if user gives one. Null otherwise.
 - location: ONLY if explicit. Never infer. To clear an existing location on update, use "".
-- calendar: ONLY if explicit. Recognize all of these as the user specifying a calendar:
+- reminder_minutes: ONLY if the user specifies a reminder lead time ("remind me 15 minutes before", "1 hour reminder", "remind me a day before"). Convert hours and days and spelled-out numbers to minutes. Null otherwise.
+- calendar: ONLY if explicit. Recognize ALL of these phrasings as the user specifying a calendar:
     - "on my work calendar" / "to my Testing Jekyll calendar"
     - "set the calendar to X" / "change the calendar to X"
     - "use my X calendar" / "put it on X"
-    - "move it to X calendar" (during create correction) / "add it to X"
-  Extract just the calendar name (e.g. "work", "Testing Jekyll"), not the surrounding verbs. Never infer a calendar from context.
+    - "move it to X calendar" / "add it to X" / "add it to my X calendar"
+  Extract just the calendar name (e.g. "work", "Testing Jekyll"), dropping the words "calendar" and "my" and any verbs. Never infer a calendar from context.
 
 PER ACTION:
 - create → fill `event` with whatever fields the user provided.
@@ -77,7 +78,7 @@ PER ACTION:
 JSON only. No prose, no markdown fences."""
 
 
-def _build_context(pending: dict | None) -> str:
+def _build_context(pending):
     now = datetime.now(TZ)
     today = now.strftime("%Y-%m-%d")
     tomorrow = (now + timedelta(days=1)).strftime("%Y-%m-%d")
@@ -102,8 +103,7 @@ def _build_context(pending: dict | None) -> str:
     return "\n".join(lines)
 
 
-def parse(message: str, pending: dict | None = None) -> CalendarAction:
-    """Returns a validated CalendarAction. Never raises."""
+def parse(message, pending=None):
     try:
         response = client.models.generate_content(
             model=MODEL,

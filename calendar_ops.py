@@ -12,7 +12,9 @@ import os
 
 TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_DURATION_MINUTES = 60
+DEFAULT_REMINDER_MINUTES = 30
 CALENDAR_LIST_TTL_HOURS = 24
+
 
 def get_service(user):
     creds = Credentials(
@@ -27,6 +29,7 @@ def get_service(user):
         user.oauth_token = encrypt_token(creds.token)
         db.session.commit()
     return build("calendar", "v3", credentials=creds)
+
 
 def get_user_calendars(user, service):
     stale = (
@@ -46,15 +49,14 @@ def get_user_calendars(user, service):
     return user.calendars
 
 
-def _calendar_similarity(hint: str, name: str) -> float:
+def _calendar_similarity(hint, name):
     h, n = hint.lower(), name.lower()
     if h in n or n in h:
         return 1.0
     return SequenceMatcher(None, h, n).ratio()
 
 
-def resolve_calendar(user, service, hint: str | None) -> tuple[str, str] | None:
-    """Returns (calendar_id, calendar_name) or None if hint given but no match found."""
+def resolve_calendar(user, service, hint):
     if not hint or not hint.strip():
         return "primary", "Default"
     calendars = get_user_calendars(user, service)
@@ -65,50 +67,28 @@ def resolve_calendar(user, service, hint: str | None) -> tuple[str, str] | None:
         return best["id"], best["name"]
     return None
 
-def _to_pacific(iso_str: str) -> datetime:
+
+def _to_pacific(iso_str):
     return datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(TZ)
 
 
-def _classify_overlap(new_start, new_end, ev_start, ev_end) -> str:
-    """Shape of overlap between an existing event and the proposed window."""
+def _classify_overlap(new_start, new_end, ev_start, ev_end):
     if ev_start == new_start and ev_end == new_end:
         return "exact"
     if ev_start <= new_start and ev_end >= new_end:
-        return "contains"         
+        return "contains"
     if ev_start >= new_start and ev_end <= new_end:
-        return "contained"         
+        return "contained"
     if ev_start < new_start:
-        return "overlaps_start"   
-    return "overlaps_end"         
+        return "overlaps_start"
+    return "overlaps_end"
 
 
-def find_conflicts(
-    user,
-    service,
-    date: str,
-    time: str,
-    duration_minutes: int | None,
-    exclude_event_id: str | None = None,
-) -> list[dict]:
-    """
-    All events overlapping the proposed window across all calendars,
-    sorted by start time. Each entry:
-        {
-            "title": str,
-            "calendar_name": str,
-            "start_dt": datetime,   # Pacific
-            "end_dt": datetime,     # Pacific
-            "overlap": str,         # exact | contains | contained | overlaps_start | overlaps_end
-            "all_day": bool,
-        }
-
-    Filters: the event being updated (if exclude_event_id given),
-    cancelled events, and events marked 'transparent' (free in Google).
-    """
+def find_conflicts(user, service, date, time, duration_minutes, exclude_event_id=None):
     new_start = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
     new_end = new_start + timedelta(minutes=duration_minutes or DEFAULT_DURATION_MINUTES)
 
-    conflicts: list[dict] = []
+    conflicts = []
     for cal in get_user_calendars(user, service):
         try:
             items = service.events().list(
@@ -151,8 +131,7 @@ def find_conflicts(
     return conflicts
 
 
-def find_upcoming_event(user, service, keyword: str) -> dict | None:
-    """Search all calendars for the next event matching keyword (or a prefix)."""
+def find_upcoming_event(user, service, keyword):
     if not keyword:
         return None
     now_iso = datetime.now(timezone.utc).isoformat()
@@ -179,8 +158,7 @@ def find_upcoming_event(user, service, keyword: str) -> dict | None:
     return None
 
 
-def list_events_for_day(user, service, day_iso: str) -> list[dict]:
-    """All events on the given calendar day in Pacific time, across all calendars."""
+def list_events_for_day(user, service, day_iso):
     day = datetime.strptime(day_iso, "%Y-%m-%d").date()
     start = datetime.combine(day, datetime.min.time()).replace(tzinfo=TZ)
     end = start + timedelta(days=1)
@@ -203,28 +181,37 @@ def list_events_for_day(user, service, day_iso: str) -> list[dict]:
             continue
     return out
 
-def insert_event(service, calendar_id: str, title: str, date: str, time: str,
-                 duration_minutes: int | None, location: str | None) -> dict:
+
+def _reminders_body(reminder_minutes):
+    return {
+        "useDefault": False,
+        "overrides": [
+            {"method": "popup", "minutes": reminder_minutes or DEFAULT_REMINDER_MINUTES}
+        ],
+    }
+
+
+def insert_event(service, calendar_id, title, date, time,
+                 duration_minutes, location, reminder_minutes):
     start = datetime.strptime(f"{date} {time}", "%Y-%m-%d %H:%M").replace(tzinfo=TZ)
     end = start + timedelta(minutes=duration_minutes or DEFAULT_DURATION_MINUTES)
     body = {
         "summary": title,
         "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
         "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
+        "reminders": _reminders_body(reminder_minutes),
     }
     if location:
         body["location"] = location
     return service.events().insert(calendarId=calendar_id, body=body).execute()
 
 
-def patch_event(service, calendar_id: str, event_id: str, fields: dict) -> dict:
-    """fields keys: title, date, time, duration_minutes, location."""
-    body: dict = {}
+def patch_event(service, calendar_id, event_id, fields):
+    body = {}
     if "title" in fields:
         body["summary"] = fields["title"]
 
     if any(k in fields for k in ("date", "time", "duration_minutes")):
-
         d = fields["date"]
         t = fields["time"]
         dur = fields.get("duration_minutes") or DEFAULT_DURATION_MINUTES
@@ -234,10 +221,13 @@ def patch_event(service, calendar_id: str, event_id: str, fields: dict) -> dict:
         body["end"] = {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"}
 
     if "location" in fields:
-        body["location"] = fields["location"]  
+        body["location"] = fields["location"]
+
+    if "reminder_minutes" in fields:
+        body["reminders"] = _reminders_body(fields["reminder_minutes"])
 
     return service.events().patch(calendarId=calendar_id, eventId=event_id, body=body).execute()
 
 
-def delete_event(service, calendar_id: str, event_id: str) -> None:
+def delete_event(service, calendar_id, event_id):
     service.events().delete(calendarId=calendar_id, eventId=event_id).execute()

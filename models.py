@@ -16,13 +16,13 @@ Action = Literal[
 
 
 class EventFields(BaseModel):
-    """All event fields. Used for create payloads and update deltas."""
     title: Optional[str] = None
     date: Optional[str] = None
     time: Optional[str] = None
     duration_minutes: Optional[int] = None
     location: Optional[str] = None
     calendar: Optional[str] = None
+    reminder_minutes: Optional[int] = None
 
 
 class CalendarAction(BaseModel):

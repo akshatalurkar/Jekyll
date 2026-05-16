@@ -2,9 +2,10 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 TZ = ZoneInfo("America/Los_Angeles")
+DEFAULT_REMINDER_MINUTES = 30
 
-def fmt_date(date_iso: str) -> str:
-    """YYYY-MM-DD → 'today', 'tomorrow', 'yesterday', or 'Fri May 17'."""
+
+def fmt_date(date_iso):
     d = datetime.strptime(date_iso, "%Y-%m-%d").date()
     today = datetime.now(TZ).date()
     delta = (d - today).days
@@ -17,18 +18,17 @@ def fmt_date(date_iso: str) -> str:
     return d.strftime("%a %b %-d")
 
 
-def fmt_time(time_24h: str) -> str:
-    """HH:MM → '3:00pm'."""
+def fmt_time(time_24h):
     h, m = map(int, time_24h.split(":"))
     suffix = "am" if h < 12 else "pm"
     h12 = h % 12 or 12
     return f"{h12}:{m:02d}{suffix}"
 
 
-def fmt_event_time_from_iso(iso_str: str) -> str:
-    """For Google Calendar event start strings."""
+def fmt_event_time_from_iso(iso_str):
     dt = datetime.fromisoformat(iso_str.replace("Z", "+00:00")).astimezone(TZ)
     return dt.strftime("%-I:%M%p").lower()
+
 
 _WARNING_PREFIX = {
     "past": "⚠️ This is in the past.",
@@ -37,7 +37,12 @@ _WARNING_PREFIX = {
 }
 
 
-def create_confirmation(event: dict, warning: str | None, conflicts: list[dict] | None = None) -> str:
+def _reminder_line(event):
+    rem = event.get("reminder_minutes")
+    return f"Reminder {rem} min before" if rem else "Reminder 30 min before (default)"
+
+
+def create_confirmation(event, warning, conflicts=None):
     lines = []
     if warning == "conflict" and conflicts:
         if len(conflicts) == 1:
@@ -60,16 +65,18 @@ def create_confirmation(event: dict, warning: str | None, conflicts: list[dict] 
 
     lines.append(event["location"] if event.get("location") else "No location")
     lines.append(f"Calendar: {event.get('calendar_name', 'Default')}")
+    lines.append(_reminder_line(event))
     lines.append("")
     lines.append("Reply *Yes* to confirm, *No* to cancel, or send a correction.")
     return "\n".join(l for l in lines if l is not None)
 
 
-def create_success(event: dict) -> str:
+def create_success(event):
     location = f" at {event['location']}" if event.get("location") else ""
     return f"✓ Added — *{event['title']}*{location} on {fmt_date(event['date'])} at {fmt_time(event['time'])}"
 
-def update_confirmation(original_title: str, diff_lines: list[str], conflicts: list[dict] | None = None) -> str:
+
+def update_confirmation(original_title, diff_lines, conflicts=None):
     lines = []
     if conflicts:
         if len(conflicts) == 1:
@@ -87,25 +94,27 @@ def update_confirmation(original_title: str, diff_lines: list[str], conflicts: l
     return "\n".join(lines)
 
 
-def update_success(title: str) -> str:
+def update_success(title):
     return f"✓ Updated — *{title}*"
 
-def delete_confirmation(title: str, when: str) -> str:
+
+def delete_confirmation(title, when):
     return (
         f"Remove *{title}* on {when}?\n\n"
         f"Reply *Yes* to confirm or *No* to cancel."
     )
 
 
-def delete_success(title: str) -> str:
+def delete_success(title):
     return f"✓ Removed — *{title}*"
 
-def list_grouped(label: str, date_label: str | None, events: list[dict]) -> str:
+
+def list_grouped(label, date_label, events):
     if not events:
         when = f" {label}" if label else ""
         return f"Nothing scheduled{when}."
 
-    groups: dict[str, list[dict]] = {}
+    groups = {}
     for e in events:
         cal = e.get("_calendar_name", "Default")
         groups.setdefault(cal, []).append(e)
@@ -129,10 +138,11 @@ def list_grouped(label: str, date_label: str | None, events: list[dict]) -> str:
     return "\n".join(out)
 
 
-def list_out_of_scope() -> str:
+def list_out_of_scope():
     return "I can only show today, tomorrow, or yesterday."
 
-def event_detail(event: dict) -> str:
+
+def event_detail(event):
     start_str = event["start"].get("dateTime") or event["start"].get("date")
     end_str = event["end"].get("dateTime") or event["end"].get("date")
     all_day = "dateTime" not in event["start"]
@@ -158,35 +168,52 @@ def event_detail(event: dict) -> str:
         lines.append(duration_label)
     if event.get("location"):
         lines.append(event["location"])
+
+    overrides = event.get("reminders", {}).get("overrides", [])
+    if overrides:
+        lines.append(f"Reminder {overrides[0]['minutes']} min before")
+
     lines.append(f"Calendar: {event.get('_calendar_name', 'Default')}")
     return "\n".join(lines)
 
-def calendar_names(names: list[str]) -> str:
+
+def calendar_names(names):
     if not names:
         return "No calendars found."
     return "Your calendars:\n" + "\n".join(f"• {n}" for n in names)
 
-def cancelled_create() -> str:
+
+def cancelled_create():
     return "OK, not adding it."
 
-def cancelled_update() -> str:
+
+def cancelled_update():
     return "OK, leaving it as-is."
 
-def cancelled_delete() -> str:
+
+def cancelled_delete():
     return "OK, keeping it on your calendar."
 
-def nothing_pending() -> str:
+
+def nothing_pending():
     return "Nothing pending. What would you like to do?"
 
-def pending_timed_out() -> str:
+
+def pending_timed_out():
     return "That timed out. What would you like to do?"
 
-def clarify(question: str | None) -> str:
+
+def clarify(question):
     return question or "Need more info."
-def rejected() -> str:
+
+
+def rejected():
     return "Calendar only."
 
-def not_found(keyword: str) -> str:
+
+def not_found(keyword):
     return f"Couldn't find '{keyword}'."
-def error() -> str:
+
+
+def error():
     return "Something went wrong. Try again."

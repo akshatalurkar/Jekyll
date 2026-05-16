@@ -13,12 +13,13 @@ TEST_MODE = os.getenv("JEKYLL_TEST_MODE") == "1"
 from core import (
     app, db, User, ProcessedMessage,
     send_whatsapp, verify_whatsapp_signature,
-    encrypt_token, decrypt_token, normalize_phone,
+    encrypt_token, normalize_phone,
     BASE_URL, NOTION_URL,
 )
 import state
 import parse
 import patch
+
 
 @app.route("/auth/<phone>")
 def auth(phone):
@@ -30,9 +31,7 @@ def auth(phone):
     oauth = OAuth2Session(
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         redirect_uri=f"{BASE_URL}/oauth/callback",
-        scope=[
-            "https://www.googleapis.com/auth/calendar"
-        ],
+        scope=["https://www.googleapis.com/auth/calendar"],
     )
     auth_url, oauth_state = oauth.authorization_url(
         "https://accounts.google.com/o/oauth2/auth",
@@ -45,6 +44,7 @@ def auth(phone):
     session["phone"] = phone
     session["code_verifier"] = code_verifier
     return render_template("auth.html", phone=phone, auth_url=auth_url)
+
 
 @app.route("/oauth/callback")
 def oauth_callback():
@@ -69,6 +69,7 @@ def oauth_callback():
     user.refresh_token = encrypt_token(token.get("refresh_token"))
     db.session.commit()
     return render_template("success.html")
+
 
 @app.route("/webhook", methods=["GET", "POST"])
 def webhook():
@@ -100,7 +101,6 @@ def webhook():
     db.session.commit()
 
     user = User.query.filter_by(phone=phone).first()
-    
     if not user or not user.oauth_token:
         send_whatsapp(
             phone,
@@ -111,6 +111,7 @@ def webhook():
             f"Full guide: {NOTION_URL}",
         )
         return "OK", 200
+
     try:
         if state.is_stale(user):
             state.clear_pending(db, user)
@@ -127,14 +128,14 @@ def webhook():
         reply = patch.dispatch(db, user, action)
         if TEST_MODE:
             return reply, 200
-        else:
-            send_whatsapp(user.phone, reply)
-            return "", 200
+        send_whatsapp(user.phone, reply)
+        return "", 200
     except Exception:
         traceback.print_exc()
         send_whatsapp(phone, "Something went wrong. Try again in a moment.")
 
     return "OK", 200
+
 
 if __name__ == "__main__":
     app.run(port=int(os.getenv("PORT", 8001)))

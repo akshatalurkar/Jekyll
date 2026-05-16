@@ -8,7 +8,9 @@ from models import CalendarAction, EventFields
 
 TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_DURATION_MINUTES = 60
-LIST_SCOPE_DAYS = 1   
+DEFAULT_REMINDER_MINUTES = 30
+LIST_SCOPE_DAYS = 1
+
 
 def dispatch(db, user, action: CalendarAction) -> str:
     pending = state.get_pending(user)
@@ -48,9 +50,8 @@ def dispatch(db, user, action: CalendarAction) -> str:
 
     return formatted.error()
 
-#confirm
 
-def _confirm(db, user, pending: dict | None) -> str:
+def _confirm(db, user, pending):
     if not pending:
         return formatted.nothing_pending()
     if state.is_stale(user):
@@ -73,7 +74,7 @@ def _confirm(db, user, pending: dict | None) -> str:
     return formatted.error()
 
 
-def _cancel(db, user, pending: dict | None) -> str:
+def _cancel(db, user, pending):
     if not pending:
         return formatted.nothing_pending()
     kind = pending.get("kind")
@@ -84,9 +85,8 @@ def _cancel(db, user, pending: dict | None) -> str:
         return formatted.cancelled_update()
     return formatted.cancelled_create()
 
-#create
 
-def _create(db, user, event_fields: EventFields | None) -> str:
+def _create(db, user, event_fields):
     if not event_fields or not event_fields.title:
         return formatted.clarify("What's the event?")
 
@@ -107,6 +107,7 @@ def _create(db, user, event_fields: EventFields | None) -> str:
         "location": event_fields.location,
         "calendar_id": cal_id,
         "calendar_name": cal_name,
+        "reminder_minutes": event_fields.reminder_minutes,
     }
 
     if not event_fields.date or not event_fields.time:
@@ -122,7 +123,7 @@ def _create(db, user, event_fields: EventFields | None) -> str:
     return formatted.create_confirmation(event, warning, conflicts)
 
 
-def _correction(db, user, pending: dict, event_fields: EventFields | None) -> str:
+def _correction(db, user, pending, event_fields):
     if not event_fields:
         return formatted.clarify("What would you like to change?")
 
@@ -137,7 +138,7 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
 
     if event_fields.calendar and event_fields.calendar.strip():
         service = calendar_ops.get_service(user)
-        resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar or None)
+        resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
         if resolved is None:
             return formatted.clarify(
                 f"Couldn't find a calendar matching '{event_fields.calendar}'. "
@@ -147,6 +148,9 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
     merged.pop("calendar", None)
 
     if kind == "create":
+        if not merged.get("date") or not merged.get("time"):
+            state.set_pending(db, user, {"kind": "create", "event": merged, "warning": None})
+            return formatted.clarify("What date and time?")
         service = calendar_ops.get_service(user)
         warning, conflicts = _detect_warning(user, service, merged)
         payload = {"kind": "create", "event": merged, "warning": warning}
@@ -169,14 +173,7 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
     return formatted.error()
 
 
-def _detect_warning(
-    user, service, event: dict, exclude_event_id: str | None = None
-) -> tuple[str | None, list[dict] | None]:
-    """
-    Returns (warning_kind, conflicts).
-    warning_kind: 'past' | 'now' | 'conflict' | None
-    conflicts: JSON-safe dicts ready for formatted.py, or None.
-    """
+def _detect_warning(user, service, event, exclude_event_id=None):
     now = datetime.now(TZ)
     event_dt = datetime.strptime(
         f"{event['date']} {event['time']}", "%Y-%m-%d %H:%M"
@@ -192,7 +189,6 @@ def _detect_warning(
         event["date"], event["time"], event.get("duration_minutes"),
         exclude_event_id=exclude_event_id,
     )
-    # All-day events on the same day don't block timed events.
     blocking = [c for c in raw if not c["all_day"]]
     if not blocking:
         return None, None
@@ -215,7 +211,7 @@ def _detect_warning(
     return "conflict", out
 
 
-def _execute_create(db, user, event: dict) -> str:
+def _execute_create(db, user, event):
     service = calendar_ops.get_service(user)
     calendar_ops.insert_event(
         service,
@@ -225,13 +221,13 @@ def _execute_create(db, user, event: dict) -> str:
         time=event["time"],
         duration_minutes=event.get("duration_minutes"),
         location=event.get("location"),
+        reminder_minutes=event.get("reminder_minutes"),
     )
     state.clear_pending(db, user)
     return formatted.create_success(event)
 
-# update
 
-def _update(db, user, target_query: str | None, changes: EventFields | None) -> str:
+def _update(db, user, target_query, changes):
     if not target_query:
         return formatted.clarify("Which event?")
     if not changes or not changes.model_dump(exclude_none=True):
@@ -246,7 +242,7 @@ def _update(db, user, target_query: str | None, changes: EventFields | None) -> 
 
     new_cal_id = original["calendar_id"]
     new_cal_name = original["calendar_name"]
-    if changes.calendar:
+    if changes.calendar and changes.calendar.strip():
         resolved = calendar_ops.resolve_calendar(user, service, changes.calendar)
         if resolved is None:
             return formatted.clarify(
@@ -262,6 +258,7 @@ def _update(db, user, target_query: str | None, changes: EventFields | None) -> 
         new_event[k] = v
     new_event["calendar_id"] = new_cal_id
     new_event["calendar_name"] = new_cal_name
+
     warning, conflicts = _detect_warning(user, service, new_event, exclude_event_id=match["id"])
     payload = {
         "kind": "update",
@@ -278,8 +275,7 @@ def _update(db, user, target_query: str | None, changes: EventFields | None) -> 
     return formatted.update_confirmation(original["title"], diff_lines, conflicts)
 
 
-def _build_update_diff(original: dict, new_event: dict) -> list[str]:
-    """One line per field that changed."""
+def _build_update_diff(original, new_event):
     lines = []
     if original["title"] != new_event["title"]:
         lines.append(f"Title: {original['title']} → {new_event['title']}")
@@ -293,12 +289,14 @@ def _build_update_diff(original: dict, new_event: dict) -> list[str]:
         new_loc = new_event.get("location") or "(cleared)"
         old_loc = original.get("location") or "(none)"
         lines.append(f"Location: {old_loc} → {new_loc}")
+    if (original.get("reminder_minutes") or DEFAULT_REMINDER_MINUTES) != (new_event.get("reminder_minutes") or DEFAULT_REMINDER_MINUTES):
+        lines.append(f"Reminder: {original.get('reminder_minutes') or DEFAULT_REMINDER_MINUTES} → {new_event.get('reminder_minutes') or DEFAULT_REMINDER_MINUTES} min before")
     if original["calendar_id"] != new_event["calendar_id"]:
         lines.append(f"Calendar: {original['calendar_name']} → {new_event['calendar_name']}")
     return lines or ["(no changes)"]
 
 
-def _execute_update(db, user, pending: dict) -> str:
+def _execute_update(db, user, pending):
     service = calendar_ops.get_service(user)
     new_event = pending["event"]
     original = pending["original"]
@@ -313,6 +311,7 @@ def _execute_update(db, user, pending: dict) -> str:
             time=new_event["time"],
             duration_minutes=new_event.get("duration_minutes"),
             location=new_event.get("location"),
+            reminder_minutes=new_event.get("reminder_minutes"),
         )
     else:
         fields_to_patch = {}
@@ -326,6 +325,8 @@ def _execute_update(db, user, pending: dict) -> str:
             fields_to_patch["duration_minutes"] = new_event.get("duration_minutes") or DEFAULT_DURATION_MINUTES
         if (new_event.get("location") or "") != (original.get("location") or ""):
             fields_to_patch["location"] = new_event.get("location") or ""
+        if (new_event.get("reminder_minutes") or DEFAULT_REMINDER_MINUTES) != (original.get("reminder_minutes") or DEFAULT_REMINDER_MINUTES):
+            fields_to_patch["reminder_minutes"] = new_event.get("reminder_minutes") or DEFAULT_REMINDER_MINUTES
 
         if fields_to_patch:
             calendar_ops.patch_event(service, new_event["calendar_id"], pending["event_id"], fields_to_patch)
@@ -333,9 +334,8 @@ def _execute_update(db, user, pending: dict) -> str:
     state.clear_pending(db, user)
     return formatted.update_success(new_event["title"])
 
-#delete
 
-def _delete(db, user, target_query: str | None) -> str:
+def _delete(db, user, target_query):
     if not target_query:
         return formatted.clarify("Which event should I remove?")
 
@@ -359,15 +359,14 @@ def _delete(db, user, target_query: str | None) -> str:
     return formatted.delete_confirmation(payload["title"], when)
 
 
-def _execute_delete(db, user, pending: dict) -> str:
+def _execute_delete(db, user, pending):
     service = calendar_ops.get_service(user)
     calendar_ops.delete_event(service, pending["calendar_id"], pending["event_id"])
     state.clear_pending(db, user)
     return formatted.delete_success(pending["title"])
 
-#list
 
-def _list(user, list_date: str | None) -> str:
+def _list(user, list_date):
     if not list_date:
         return formatted.clarify("Which day? Today, tomorrow, or yesterday?")
 
@@ -387,9 +386,8 @@ def _list(user, list_date: str | None) -> str:
 
     return formatted.list_grouped(label, date_label, events)
 
-#detail
 
-def _detail(user, target_query: str | None) -> str:
+def _detail(user, target_query):
     if not target_query:
         return formatted.clarify("Which event?")
 
@@ -399,21 +397,20 @@ def _detail(user, target_query: str | None) -> str:
         return formatted.not_found(target_query)
     return formatted.event_detail(match)
 
-#list calendars
 
-def _list_calendars(user) -> str:
+def _list_calendars(user):
     service = calendar_ops.get_service(user)
     calendars = calendar_ops.get_user_calendars(user, service)
     return formatted.calendar_names([c["name"] for c in calendars])
 
-#helper method
 
-def _event_to_dict(gcal_event: dict) -> dict:
-    """Convert a Google Calendar event into our internal event dict."""
+def _event_to_dict(gcal_event):
     start = gcal_event["start"].get("dateTime") or gcal_event["start"].get("date")
     end = gcal_event["end"].get("dateTime") or gcal_event["end"].get("date")
     start_dt = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone(TZ)
     end_dt = datetime.fromisoformat(end.replace("Z", "+00:00")).astimezone(TZ)
+    overrides = gcal_event.get("reminders", {}).get("overrides", [])
+    reminder_minutes = overrides[0]["minutes"] if overrides else None
     return {
         "title": gcal_event.get("summary", "(untitled)"),
         "date": start_dt.strftime("%Y-%m-%d"),
@@ -422,4 +419,5 @@ def _event_to_dict(gcal_event: dict) -> dict:
         "location": gcal_event.get("location") or "",
         "calendar_id": gcal_event["_calendar_id"],
         "calendar_name": gcal_event["_calendar_name"],
+        "reminder_minutes": reminder_minutes,
     }
