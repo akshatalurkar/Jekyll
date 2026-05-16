@@ -135,9 +135,9 @@ def _correction(db, user, pending: dict, event_fields: EventFields | None) -> st
     for k, v in event_fields.model_dump(exclude_none=True).items():
         merged[k] = v
 
-    if event_fields.calendar:
+    if event_fields.calendar and event_fields.calendar.strip():
         service = calendar_ops.get_service(user)
-        resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
+        resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar or None)
         if resolved is None:
             return formatted.clarify(
                 f"Couldn't find a calendar matching '{event_fields.calendar}'. "

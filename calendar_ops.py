@@ -55,7 +55,7 @@ def _calendar_similarity(hint: str, name: str) -> float:
 
 def resolve_calendar(user, service, hint: str | None) -> tuple[str, str] | None:
     """Returns (calendar_id, calendar_name) or None if hint given but no match found."""
-    if not hint:
+    if not hint or not hint.strip():
         return "primary", "Default"
     calendars = get_user_calendars(user, service)
     if not calendars:
