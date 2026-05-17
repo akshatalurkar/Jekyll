@@ -19,7 +19,7 @@ ACTIONS:
 - create: user wants to add a new event, OR is correcting fields on a pending event
     - Verbs: add, create, schedule, set up, make (when followed by a new event name)
 - update: user wants to change an already-scheduled event
-    - Verbs: move, reschedule, change, edit, make (when followed by a field change on an existing event - "make it 30 minutes", "make the meeting earlier")
+    - Verbs: move, reschedule, change, edit, make (when followed by a field change on an existing event)
 - delete: user wants to remove an existing event (verbs: cancel, delete, remove)
 - list: user wants events for today, tomorrow, or yesterday
 - detail: user wants full info on ONE specific event ("tell me about", "what time is", "details on")
@@ -31,10 +31,11 @@ ACTIONS:
 
 PENDING STATE RULES:
 - If pending state exists and user types event fields without a verb ("4pm", "make it Starbucks", "30 min instead") → action=create. It is a correction.
-- A correction can change ANY field, including the calendar and the reminder. "put it on my work calendar", "add it to Testing Jekyll", "set the calendar to X", "remind me 15 min before" → action=create with that single field filled in `event`.
+- A correction can change ANY field including calendar and reminder. "change calendar to X", "put it on X", "add it to my X calendar", "remind me 15 min before" → action=create with that field in `event`.
 - "yes" + pending → confirm. "no" + pending → cancel.
-- "no, make it 4pm" + pending → create (it's a correction, not a cancel).
+- "no, make it 4pm" + pending → create (correction, not cancel).
 - "make it [field value]" + pending → create (correction), never update.
+- If user says "edit [event]" or "update [event]" while a pending create exists, treat it as update (not a correction), and clear the pending intent.
 
 DATE RULES:
 - "today" → use Today date from context.
@@ -61,19 +62,20 @@ FIELD RULES:
 - duration_minutes: ONLY if user gives one. Null otherwise.
 - location: ONLY if explicit. Never infer. To clear an existing location on update, use "".
 - reminder_minutes: ONLY if the user specifies a reminder lead time ("remind me 15 minutes before", "1 hour reminder", "remind me a day before"). Convert hours and days and spelled-out numbers to minutes. Null otherwise.
-- calendar: ONLY if explicit. Recognize ALL of these phrasings as the user specifying a calendar:
-    - "on my work calendar" / "to my Testing Jekyll calendar"
-    - "set the calendar to X" / "change the calendar to X"
-    - "use my X calendar" / "put it on X"
-    - "move it to X calendar" / "add it to X" / "add it to my X calendar"
-  Extract just the calendar name (e.g. "work", "Testing Jekyll"), dropping the words "calendar" and "my" and any verbs. Never infer a calendar from context.
+- calendar: ONLY if the user explicitly names one. Extract just the calendar name, dropping "my", "the", "calendar", and any verbs. Examples:
+    - "on my work calendar" → "work"
+    - "add it to Testing Jekyll" → "Testing Jekyll"
+    - "set the calendar to aalurkar05@gmail.com" → "aalurkar05@gmail.com"
+    - "change calendar to default" → "default"
+    - "put it on my main calendar" → "main"
+  Never infer a calendar from context.
 
 PER ACTION:
 - create → fill `event` with whatever fields the user provided.
 - update → `target_query` = search keyword for the event. `event` = ONLY the fields that change.
 - delete → `target_query` = search keyword.
 - detail → `target_query` = search keyword.
-- list → `list_date` = YYYY-MM-DD for the SPECIFIC day they asked about. If they name any day (Friday, Monday, May 20), resolve it to that exact date — never substitute today's date even if it happens to be that day. If they say a vague range ("next week", "this weekend", "the rest of the month"), set `list_date` to null.
+- list → `list_date` = YYYY-MM-DD for the SPECIFIC day they asked about. If they name any day (Friday, Monday, May 20), resolve it to that exact date — never substitute today's date even if it happens to be that day. If they say a vague range ("next week", "this weekend"), set `list_date` to null.
 
 JSON only. No prose, no markdown fences."""
 

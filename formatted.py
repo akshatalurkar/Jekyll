@@ -30,20 +30,19 @@ def fmt_event_time_from_iso(iso_str):
     return dt.strftime("%-I:%M%p").lower()
 
 
-_WARNING_PREFIX = {
-    "past": "⚠️ This is in the past.",
-    "now":  "⚠️ This is happening right now.",
-    "conflict": None,
-}
-
-
-def _reminder_line(event):
-    rem = event.get("reminder_minutes")
-    return f"Reminder {rem} min before" if rem else "Reminder 30 min before (default)"
+def _detail_line(event):
+    dur = event.get("duration_minutes")
+    dur_str = f"{dur} min" if dur else "60 min"
+    loc = event.get("location")
+    cal = event.get("calendar_name", "Default")
+    rem = event.get("reminder_minutes") or DEFAULT_REMINDER_MINUTES
+    parts = [dur_str, loc if loc else None, cal, f"reminder {rem} min before"]
+    return " · ".join(p for p in parts if p)
 
 
 def create_confirmation(event, warning, conflicts=None):
     lines = []
+
     if warning == "conflict" and conflicts:
         if len(conflicts) == 1:
             c = conflicts[0]
@@ -52,61 +51,56 @@ def create_confirmation(event, warning, conflicts=None):
             lines.append(f"⚠️ Overlaps {len(conflicts)} events:")
             for c in conflicts:
                 lines.append(f"  • *{c['title']}* ({c['calendar_name']}) — {c['time_range']}")
-    elif warning in _WARNING_PREFIX:
-        lines.append(_WARNING_PREFIX[warning])
+        lines.append("")
+    elif warning == "past":
+        lines.append("⚠️ This is in the past.")
+        lines.append("")
+    elif warning == "now":
+        lines.append("⚠️ This is happening right now.")
+        lines.append("")
 
-    lines.append("Here's what I'll add:" if not warning else "")
+    lines.append(f"*{event['title']}* — {fmt_date(event['date'])} at {fmt_time(event['time'])}")
+    lines.append(_detail_line(event))
     lines.append("")
-    lines.append(f"*{event['title']}*")
-    lines.append(f"{fmt_date(event['date'])} at {fmt_time(event['time'])}")
-
-    dur = event.get("duration_minutes")
-    lines.append(f"{dur} min" if dur else "60 min (default)")
-
-    lines.append(event["location"] if event.get("location") else "No location")
-    lines.append(f"Calendar: {event.get('calendar_name', 'Default')}")
-    lines.append(_reminder_line(event))
-    lines.append("")
-    lines.append("Reply *Yes* to confirm, *No* to cancel, or send a correction.")
-    return "\n".join(l for l in lines if l is not None)
+    lines.append("*Yes* to add, or tell me what to change.")
+    return "\n".join(lines)
 
 
 def create_success(event):
-    location = f" at {event['location']}" if event.get("location") else ""
-    return f"✓ Added — *{event['title']}*{location} on {fmt_date(event['date'])} at {fmt_time(event['time'])}"
+    loc = f" at {event['location']}" if event.get("location") else ""
+    return f"✓ *{event['title']}*{loc} — {fmt_date(event['date'])} at {fmt_time(event['time'])}"
 
 
 def update_confirmation(original_title, diff_lines, conflicts=None):
     lines = []
+
     if conflicts:
         if len(conflicts) == 1:
             c = conflicts[0]
-            lines.append(f"⚠️ Conflicts with *{c['title']}* ({c['calendar_name']}) — {c['time_range']}\n")
+            lines.append(f"⚠️ Conflicts with *{c['title']}* ({c['calendar_name']}) — {c['time_range']}")
         else:
             lines.append(f"⚠️ Overlaps {len(conflicts)} events:")
             for c in conflicts:
                 lines.append(f"  • *{c['title']}* ({c['calendar_name']}) — {c['time_range']}")
-            lines.append("")
+        lines.append("")
 
-    lines.append(f"Here's what I'll change for *{original_title}*:\n")
-    lines.append("\n".join(diff_lines))
-    lines.append("\nReply *Yes* to confirm, *No* to cancel, or send a correction.")
+    lines.append(f"*{original_title}*")
+    lines.extend(diff_lines)
+    lines.append("")
+    lines.append("*Yes* to save, or tell me what to change.")
     return "\n".join(lines)
 
 
 def update_success(title):
-    return f"✓ Updated — *{title}*"
+    return f"✓ *{title}* updated."
 
 
 def delete_confirmation(title, when):
-    return (
-        f"Remove *{title}* on {when}?\n\n"
-        f"Reply *Yes* to confirm or *No* to cancel."
-    )
+    return f"Remove *{title}* on {when}?\n\n*Yes* to remove, *No* to keep."
 
 
 def delete_success(title):
-    return f"✓ Removed — *{title}*"
+    return f"✓ *{title}* removed."
 
 
 def list_grouped(label, date_label, events):
@@ -129,12 +123,8 @@ def list_grouped(label, date_label, events):
         out.append(f"_{cal_name}_")
         for e in groups[cal_name]:
             start = e["start"].get("dateTime") or e["start"].get("date")
-            if "dateTime" in e["start"]:
-                time_str = fmt_event_time_from_iso(start)
-            else:
-                time_str = "all day"
-            title = e.get("summary", "(untitled)")
-            out.append(f"• {time_str}  {title}")
+            time_str = fmt_event_time_from_iso(start) if "dateTime" in e["start"] else "all day"
+            out.append(f"• {time_str}  {e.get('summary', '(untitled)')}")
     return "\n".join(out)
 
 
@@ -149,8 +139,8 @@ def event_detail(event):
 
     if all_day:
         date_label = datetime.strptime(start_str, "%Y-%m-%d").strftime("%A, %b %-d")
-        time_label = "all day"
-        duration_label = ""
+        time_label = "All day"
+        duration_label = None
     else:
         start_dt = datetime.fromisoformat(start_str.replace("Z", "+00:00")).astimezone(TZ)
         end_dt = datetime.fromisoformat(end_str.replace("Z", "+00:00")).astimezone(TZ)
@@ -159,11 +149,7 @@ def event_detail(event):
         mins = int((end_dt - start_dt).total_seconds() / 60)
         duration_label = f"{mins} min"
 
-    lines = [
-        f"*{event.get('summary', '(untitled)')}*",
-        date_label,
-        time_label,
-    ]
+    lines = [f"*{event.get('summary', '(untitled)')}*", date_label, time_label]
     if duration_label:
         lines.append(duration_label)
     if event.get("location"):
@@ -173,7 +159,7 @@ def event_detail(event):
     if overrides:
         lines.append(f"Reminder {overrides[0]['minutes']} min before")
 
-    lines.append(f"Calendar: {event.get('_calendar_name', 'Default')}")
+    lines.append(f"_{event.get('_calendar_name', 'Default')}_")
     return "\n".join(lines)
 
 
@@ -184,23 +170,23 @@ def calendar_names(names):
 
 
 def cancelled_create():
-    return "OK, not adding it."
+    return "Cancelled."
 
 
 def cancelled_update():
-    return "OK, leaving it as-is."
+    return "No changes made."
 
 
 def cancelled_delete():
-    return "OK, keeping it on your calendar."
+    return "Kept on your calendar."
 
 
 def nothing_pending():
-    return "Nothing pending. What would you like to do?"
+    return "Nothing pending. What would you like to schedule?"
 
 
 def pending_timed_out():
-    return "That timed out. What would you like to do?"
+    return "That timed out — what would you like to do?"
 
 
 def clarify(question):
@@ -208,7 +194,7 @@ def clarify(question):
 
 
 def rejected():
-    return "Calendar only."
+    return "I only handle calendar stuff. What would you like to schedule?"
 
 
 def not_found(keyword):

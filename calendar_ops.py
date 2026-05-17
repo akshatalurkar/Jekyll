@@ -15,6 +15,11 @@ DEFAULT_DURATION_MINUTES = 60
 DEFAULT_REMINDER_MINUTES = 30
 CALENDAR_LIST_TTL_HOURS = 24
 
+PRIMARY_ALIASES = {
+    "default", "primary", "main", "my calendar",
+    "default calendar", "the default", "primary calendar",
+}
+
 
 def get_service(user):
     creds = Credentials(
@@ -43,6 +48,7 @@ def get_user_calendars(user, service):
         user.calendars = [
             {"id": c["id"], "name": c["summary"]}
             for c in result.get("items", [])
+            if c.get("accessRole") in ("owner", "writer")
         ]
         user.calendars_updated_at = datetime.now(timezone.utc)
         db.session.commit()
@@ -58,6 +64,8 @@ def _calendar_similarity(hint, name):
 
 def resolve_calendar(user, service, hint):
     if not hint or not hint.strip():
+        return "primary", "Default"
+    if hint.strip().lower() in PRIMARY_ALIASES:
         return "primary", "Default"
     calendars = get_user_calendars(user, service)
     if not calendars:

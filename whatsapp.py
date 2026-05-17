@@ -125,7 +125,7 @@ def webhook():
             action = CalendarAction(action="cancel")
         else:
             action = parse.parse(text, pending)
-        reply = patch.dispatch(db, user, action)
+        reply = patch.dispatch(db, user, action, message=text)
         if TEST_MODE:
             return reply, 200
         send_whatsapp(user.phone, reply)

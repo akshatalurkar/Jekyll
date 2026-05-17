@@ -1,3 +1,4 @@
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -11,8 +12,23 @@ DEFAULT_DURATION_MINUTES = 60
 DEFAULT_REMINDER_MINUTES = 30
 LIST_SCOPE_DAYS = 1
 
+_CAL_TO_X = re.compile(r"calendars?\s+to\s+(.+)", re.I)
+_TO_X_CAL = re.compile(r"\bto\s+(?:the\s+|my\s+)?(.+?)\s+calendars?\b", re.I)
 
-def dispatch(db, user, action: CalendarAction) -> str:
+
+def _calendar_from_text(message):
+    if not message:
+        return None
+    m = _CAL_TO_X.search(message)
+    if m:
+        return m.group(1).strip(" .")
+    m = _TO_X_CAL.search(message)
+    if m:
+        return m.group(1).strip(" .")
+    return None
+
+
+def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
     pending = state.get_pending(user)
 
     if action.action == "reject":
@@ -28,13 +44,13 @@ def dispatch(db, user, action: CalendarAction) -> str:
         return _cancel(db, user, pending)
 
     if pending and action.action == "create":
-        return _correction(db, user, pending, action.event)
+        return _correction(db, user, pending, action.event, message)
 
     if action.action == "create":
-        return _create(db, user, action.event)
+        return _create(db, user, action.event, message)
 
     if action.action == "update":
-        return _update(db, user, action.target_query, action.event)
+        return _update(db, user, action.target_query, action.event, message)
 
     if action.action == "delete":
         return _delete(db, user, action.target_query)
@@ -86,15 +102,24 @@ def _cancel(db, user, pending):
     return formatted.cancelled_create()
 
 
-def _create(db, user, event_fields):
+def _resolve_hint(user, service, hint):
+    resolved = calendar_ops.resolve_calendar(user, service, hint)
+    return resolved
+
+
+def _create(db, user, event_fields, message=""):
     if not event_fields or not event_fields.title:
         return formatted.clarify("What's the event?")
 
+    cal_hint = event_fields.calendar
+    if not (cal_hint and cal_hint.strip()):
+        cal_hint = _calendar_from_text(message)
+
     service = calendar_ops.get_service(user)
-    resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
+    resolved = calendar_ops.resolve_calendar(user, service, cal_hint)
     if resolved is None:
         return formatted.clarify(
-            f"Couldn't find a calendar matching '{event_fields.calendar}'. "
+            f"Couldn't find a calendar matching '{cal_hint}'. "
             f"Text 'what calendars do I have' to see your exact calendar names."
         )
     cal_id, cal_name = resolved
@@ -123,7 +148,7 @@ def _create(db, user, event_fields):
     return formatted.create_confirmation(event, warning, conflicts)
 
 
-def _correction(db, user, pending, event_fields):
+def _correction(db, user, pending, event_fields, message=""):
     if not event_fields:
         return formatted.clarify("What would you like to change?")
 
@@ -136,16 +161,26 @@ def _correction(db, user, pending, event_fields):
     for k, v in event_fields.model_dump(exclude_none=True).items():
         merged[k] = v
 
-    if event_fields.calendar and event_fields.calendar.strip():
+    cal_hint = event_fields.calendar
+    if not (cal_hint and cal_hint.strip()):
+        cal_hint = _calendar_from_text(message)
+
+    if cal_hint and cal_hint.strip():
         service = calendar_ops.get_service(user)
-        resolved = calendar_ops.resolve_calendar(user, service, event_fields.calendar)
+        resolved = calendar_ops.resolve_calendar(user, service, cal_hint)
         if resolved is None:
             return formatted.clarify(
-                f"Couldn't find a calendar matching '{event_fields.calendar}'. "
+                f"Couldn't find a calendar matching '{cal_hint}'. "
                 f"Text 'what calendars do I have' to see your exact calendar names."
             )
         merged["calendar_id"], merged["calendar_name"] = resolved
     merged.pop("calendar", None)
+
+    if merged == current:
+        return formatted.clarify(
+            "I didn't catch a change there. You can adjust the time, date, "
+            "calendar, location, duration, or reminder."
+        )
 
     if kind == "create":
         if not merged.get("date") or not merged.get("time"):
@@ -227,10 +262,17 @@ def _execute_create(db, user, event):
     return formatted.create_success(event)
 
 
-def _update(db, user, target_query, changes):
+def _update(db, user, target_query, changes, message=""):
     if not target_query:
         return formatted.clarify("Which event?")
-    if not changes or not changes.model_dump(exclude_none=True):
+    if not changes:
+        return formatted.clarify("What would you like to change?")
+
+    cal_hint = changes.calendar
+    if not (cal_hint and cal_hint.strip()):
+        cal_hint = _calendar_from_text(message)
+
+    if not changes.model_dump(exclude_none=True) and not cal_hint:
         return formatted.clarify("What would you like to change?")
 
     service = calendar_ops.get_service(user)
@@ -242,11 +284,11 @@ def _update(db, user, target_query, changes):
 
     new_cal_id = original["calendar_id"]
     new_cal_name = original["calendar_name"]
-    if changes.calendar and changes.calendar.strip():
-        resolved = calendar_ops.resolve_calendar(user, service, changes.calendar)
+    if cal_hint and cal_hint.strip():
+        resolved = calendar_ops.resolve_calendar(user, service, cal_hint)
         if resolved is None:
             return formatted.clarify(
-                f"Couldn't find a calendar matching '{changes.calendar}'. "
+                f"Couldn't find a calendar matching '{cal_hint}'. "
                 f"Text 'what calendars do I have' to see your exact calendar names."
             )
         new_cal_id, new_cal_name = resolved
