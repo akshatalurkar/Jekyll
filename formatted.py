@@ -30,14 +30,11 @@ def fmt_event_time_from_iso(iso_str):
     return dt.strftime("%-I:%M%p").lower()
 
 
-def _detail_line(event):
-    dur = event.get("duration_minutes")
-    dur_str = f"{dur} min" if dur else "60 min"
-    loc = event.get("location")
-    cal = event.get("calendar_name", "Default")
-    rem = event.get("reminder_minutes") or DEFAULT_REMINDER_MINUTES
-    parts = [dur_str, loc if loc else None, cal, f"reminder {rem} min before"]
-    return " · ".join(p for p in parts if p)
+def _fmt_datetime(date_iso, time_24h):
+    date_str = fmt_date(date_iso)
+    time_str = fmt_time(time_24h)
+    combined = f"{date_str} at {time_str}"
+    return combined[0].upper() + combined[1:]
 
 
 def create_confirmation(event, warning, conflicts=None):
@@ -59,16 +56,25 @@ def create_confirmation(event, warning, conflicts=None):
         lines.append("⚠️ This is happening right now.")
         lines.append("")
 
-    lines.append(f"*{event['title']}* — {fmt_date(event['date'])} at {fmt_time(event['time'])}")
-    lines.append(_detail_line(event))
+    dur = event.get("duration_minutes") or 60
+    rem = event.get("reminder_minutes") or DEFAULT_REMINDER_MINUTES
+    cal = event.get("calendar_name") or "Calendar Not Set"
+    loc = event.get("location") or "Location Not Set"
+
+    lines.append(f"*{event['title']}*")
+    lines.append(_fmt_datetime(event['date'], event['time']))
+    lines.append(f"{dur} min")
+    lines.append(loc)
+    lines.append(f"Calendar: {cal}")
+    lines.append(f"Reminder: {rem} min before")
     lines.append("")
-    lines.append("*Yes* to add, or tell me what to change.")
+    lines.append("Reply *Yes* to confirm, *No* to cancel, or *Edit* followed by any corrections")
     return "\n".join(lines)
 
 
 def create_success(event):
     loc = f" at {event['location']}" if event.get("location") else ""
-    return f"✓ *{event['title']}*{loc} — {fmt_date(event['date'])} at {fmt_time(event['time'])}"
+    return f"✓ *{event['title']}*{loc} — {_fmt_datetime(event['date'], event['time'])}"
 
 
 def update_confirmation(original_title, diff_lines, conflicts=None):
@@ -87,7 +93,7 @@ def update_confirmation(original_title, diff_lines, conflicts=None):
     lines.append(f"*{original_title}*")
     lines.extend(diff_lines)
     lines.append("")
-    lines.append("*Yes* to save, or tell me what to change.")
+    lines.append("*Yes* / *No* / or edit")
     return "\n".join(lines)
 
 
@@ -96,7 +102,7 @@ def update_success(title):
 
 
 def delete_confirmation(title, when):
-    return f"Remove *{title}* on {when}?\n\n*Yes* to remove, *No* to keep."
+    return f"Remove *{title}* on {when}?\n\n*Yes* / *No*"
 
 
 def delete_success(title):
@@ -157,7 +163,7 @@ def event_detail(event):
 
     overrides = event.get("reminders", {}).get("overrides", [])
     if overrides:
-        lines.append(f"Reminder {overrides[0]['minutes']} min before")
+        lines.append(f"Reminder: {overrides[0]['minutes']} min before")
 
     lines.append(f"_{event.get('_calendar_name', 'Default')}_")
     return "\n".join(lines)
