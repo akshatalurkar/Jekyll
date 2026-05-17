@@ -68,7 +68,7 @@ def create_confirmation(event, warning, conflicts=None):
     lines.append(f"Calendar: {cal}")
     lines.append(f"Reminder: {rem} min before")
     lines.append("")
-    lines.append("Reply *Yes* to confirm, *No* to cancel, or *Edit* followed by any corrections")
+    lines.append("Reply *Yes* to confirm, *No* to cancel, or send a correction")
     return "\n".join(lines)
 
 
