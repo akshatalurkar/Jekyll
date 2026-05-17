@@ -47,7 +47,7 @@ def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
         return _refresh(db, user)
 
     if pending and action.action == "create":
-        if pending.get("kind") == "create" and action.event and not action.event.title:
+        if pending.get("kind") == "create" and action.event and action.event.title:
             state.clear_pending(db, user)
             return _create(db, user, action.event, message)
         return _correction(db, user, pending, action.event, message)
@@ -57,7 +57,7 @@ def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
 
     if action.action == "update":
         if pending and pending.get("kind") == "create":
-            state.clear_pending(db, user)
+            return _correction(db, user, pending, action.event, message)
         return _update(db, user, action.target_query, action.event, message)
 
     if action.action == "delete":

@@ -19,7 +19,7 @@ ACTIONS:
 - create: user wants to add a new event, OR is correcting fields on a pending event
     - Verbs: add, create, schedule, set up, make (when followed by a new event name)
 - update: user wants to change an already-scheduled event
-    - Verbs: move, reschedule, change, edit, make (when followed by a field change on an existing event)
+    - Verbs: move, reschedule, change, edit, set, make (when followed by a field change on an existing event)
 - delete: user wants to remove an existing event (verbs: cancel, delete, remove)
 - list: user wants events for today, tomorrow, or yesterday
 - detail: user wants full info on ONE specific event ("tell me about", "what time is", "details on")
@@ -36,7 +36,7 @@ PENDING STATE RULES:
 - "yes" + pending → confirm. "no" + pending → cancel.
 - "no, make it 4pm" + pending → create (correction, not cancel).
 - "make it [field value]" + pending → create (correction), never update.
-- If user says "edit [event]" or "update [event]" while a pending create exists, treat it as update (not a correction), and clear the pending intent.
+- If user says "edit [event]" or "update [event]"  or "set [variable] to [value]" while a pending create exists, treat it as update (not a correction), and clear the pending intent.
 
 DATE RULES:
 - "today" → use Today date from context.
