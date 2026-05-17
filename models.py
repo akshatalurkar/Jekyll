@@ -24,6 +24,7 @@ class EventFields(BaseModel):
     location: Optional[str] = None
     calendar: Optional[str] = None
     reminder_minutes: Optional[int] = None
+    reminder_at: Optional[str] = None
 
 
 class CalendarAction(BaseModel):

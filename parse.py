@@ -70,6 +70,7 @@ FIELD RULES:
     - "change calendar to default" → "default"
     - "put it on my main calendar" → "main"
   Never infer a calendar from context.
+- reminder_at: set this when the user gives an absolute reminder time ("remind me at 2pm", "remind me at noon"). Put the time as 24-hour HH:MM. When you set reminder_at, do NOT also put that time in time — it is the reminder, not the event.
 
 PER ACTION:
 - create → fill `event` with whatever fields the user provided.

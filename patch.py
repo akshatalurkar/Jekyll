@@ -27,6 +27,13 @@ def _calendar_from_text(message):
         return m.group(1).strip(" .")
     return None
 
+def _resolve_reminder(reminder_at, event_date, event_time):
+    if not reminder_at:
+        return None
+    start = datetime.strptime(f"{event_date} {event_time}", "%Y-%m-%d %H:%M")
+    rem = datetime.strptime(f"{event_date} {reminder_at}", "%Y-%m-%d %H:%M")
+    minutes = int((start - rem).total_seconds() / 60)
+    return minutes
 
 def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
     pending = state.get_pending(user)
@@ -151,6 +158,9 @@ def _create(db, user, event_fields, message=""):
         state.set_pending(db, user, {"kind": "create", "event": event, "warning": None})
         return formatted.clarify("What date and time?")
 
+    if not event.get("reminder_minutes") and event_fields.reminder_at:
+        event["reminder_minutes"] = _resolve_reminder(event_fields.reminder_at, event["date"], event["time"])
+
     warning, conflicts = _detect_warning(user, service, event)
     payload = {"kind": "create", "event": event, "warning": warning}
     if conflicts:
@@ -198,6 +208,10 @@ def _correction(db, user, pending, event_fields, message=""):
         if not merged.get("date") or not merged.get("time"):
             state.set_pending(db, user, {"kind": "create", "event": merged, "warning": None})
             return formatted.clarify("What date and time?")
+        
+        if not merged.get("reminder_minutes") and event_fields.reminder_at:
+            merged["reminder_minutes"] = _resolve_reminder(event_fields.reminder_at, merged["date"], merged["time"])
+
         service = calendar_ops.get_service(user)
         warning, conflicts = _detect_warning(user, service, merged)
         payload = {"kind": "create", "event": merged, "warning": warning}
@@ -312,6 +326,9 @@ def _update(db, user, target_query, changes, message=""):
         new_event[k] = v
     new_event["calendar_id"] = new_cal_id
     new_event["calendar_name"] = new_cal_name
+
+    if not changes.model_dump(exclude_none=True).get("reminder_minutes") and getattr(changes, "reminder_at", None):
+        new_event["reminder_minutes"] = _resolve_reminder(changes.reminder_at, new_event["date"], new_event["time"])
 
     warning, conflicts = _detect_warning(user, service, new_event, exclude_event_id=match["id"])
     payload = {
