@@ -8,6 +8,7 @@ Action = Literal[
     "list",
     "detail",
     "list_calendars",
+    "refresh",
     "confirm",
     "cancel",
     "reject",

@@ -43,6 +43,9 @@ def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
     if action.action == "cancel":
         return _cancel(db, user, pending)
 
+    if action.action == "refresh":
+        return _refresh(db, user)
+
     if pending and action.action == "create":
         return _correction(db, user, pending, action.event, message)
 
@@ -65,6 +68,15 @@ def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
         return _list_calendars(user)
 
     return formatted.error()
+
+
+def _refresh(db, user):
+    user.calendars = None
+    user.calendars_updated_at = None
+    db.session.commit()
+    service = calendar_ops.get_service(user)
+    calendar_ops.get_user_calendars(user, service)
+    return "Refreshed."
 
 
 def _confirm(db, user, pending):
@@ -102,11 +114,6 @@ def _cancel(db, user, pending):
     return formatted.cancelled_create()
 
 
-def _resolve_hint(user, service, hint):
-    resolved = calendar_ops.resolve_calendar(user, service, hint)
-    return resolved
-
-
 def _create(db, user, event_fields, message=""):
     if not event_fields or not event_fields.title:
         return formatted.clarify("What's the event?")
@@ -120,7 +127,7 @@ def _create(db, user, event_fields, message=""):
     if resolved is None:
         return formatted.clarify(
             f"Couldn't find a calendar matching '{cal_hint}'. "
-            f"Text 'what calendars do I have' to see your exact calendar names."
+            f"Text 'what calendars do I have' to see your options."
         )
     cal_id, cal_name = resolved
 
@@ -171,14 +178,14 @@ def _correction(db, user, pending, event_fields, message=""):
         if resolved is None:
             return formatted.clarify(
                 f"Couldn't find a calendar matching '{cal_hint}'. "
-                f"Text 'what calendars do I have' to see your exact calendar names."
+                f"Text 'what calendars do I have' to see your options."
             )
         merged["calendar_id"], merged["calendar_name"] = resolved
     merged.pop("calendar", None)
 
     if merged == current:
         return formatted.clarify(
-            "I didn't catch a change there. You can adjust the time, date, "
+            "I didn't catch a change. You can adjust the time, date, "
             "calendar, location, duration, or reminder."
         )
 
@@ -289,7 +296,7 @@ def _update(db, user, target_query, changes, message=""):
         if resolved is None:
             return formatted.clarify(
                 f"Couldn't find a calendar matching '{cal_hint}'. "
-                f"Text 'what calendars do I have' to see your exact calendar names."
+                f"Text 'what calendars do I have' to see your options."
             )
         new_cal_id, new_cal_name = resolved
 

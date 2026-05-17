@@ -24,6 +24,7 @@ ACTIONS:
 - list: user wants events for today, tomorrow, or yesterday
 - detail: user wants full info on ONE specific event ("tell me about", "what time is", "details on")
 - list_calendars: user asks what calendars they have
+- refresh: user wants to sync or refresh their calendar data ("refresh", "sync", "update my calendars", "check for new calendars", "resync")
 - confirm: bare yes (yes, yeah, yep, ok, sure, do it, confirm, correct)
 - cancel: bare no (no, nope, never mind, forget it, cancel, stop, don't)
 - reject: message is not about calendar/scheduling
@@ -76,6 +77,7 @@ PER ACTION:
 - delete → `target_query` = search keyword.
 - detail → `target_query` = search keyword.
 - list → `list_date` = YYYY-MM-DD for the SPECIFIC day they asked about. If they name any day (Friday, Monday, May 20), resolve it to that exact date — never substitute today's date even if it happens to be that day. If they say a vague range ("next week", "this weekend"), set `list_date` to null.
+- refresh → no additional fields needed.
 
 JSON only. No prose, no markdown fences."""
 
