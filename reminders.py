@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from core import app, db, User, SentReminder, send_whatsapp
 import calendar_ops
 
-WINDOW_MINUTES = 1
+WINDOW_MINUTES = 5
 DEFAULT_REMINDER_MINUTES = 30
 
 
