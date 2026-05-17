@@ -1,9 +1,7 @@
-import base64
 import hashlib
 import hmac
 import os
 import requests
-import secrets
 from datetime import datetime, timezone
 
 from cryptography.fernet import Fernet
@@ -53,6 +51,12 @@ class ProcessedMessage(db.Model):
     message_id = db.Column(db.String(255), unique=True, nullable=False)
     created_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
 
+class SentReminder(db.Model):
+    id = db.Column(db.Integer, primary_key=True)
+    user_id = db.Column(db.Integer, db.ForeignKey("user.id"), nullable=False)
+    event_id = db.Column(db.String(255), nullable=False)
+    reminded_at = db.Column(db.DateTime, default=lambda: datetime.now(timezone.utc))
+    __table_args__ = (db.UniqueConstraint("user_id", "event_id", name="uq_user_event_reminder"),)
 
 with app.app_context():
     db.create_all()

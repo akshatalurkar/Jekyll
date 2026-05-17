@@ -11,7 +11,7 @@ import os
 TEST_MODE = os.getenv("JEKYLL_TEST_MODE") == "1"
 
 from core import (
-    app, db, User, ProcessedMessage,
+    app, db, User, ProcessedMessage, SentReminder,
     send_whatsapp, verify_whatsapp_signature,
     encrypt_token, normalize_phone,
     BASE_URL, NOTION_URL,
@@ -130,11 +130,20 @@ def webhook():
             return reply, 200
         send_whatsapp(user.phone, reply)
         return "", 200
-    except Exception:
+    except Exception as e:
         traceback.print_exc()
-        send_whatsapp(phone, "Something went wrong. Try again in a moment.")
-
-    return "OK", 200
+        try:
+            state.clear_pending(db, user)
+        except Exception:
+            pass
+        try:
+            msg = "Something went wrong. Try again in a moment."
+            if TEST_MODE:
+                return msg, 500
+            send_whatsapp(phone, msg)
+        except Exception:
+            pass
+        return "OK", 500
 
 
 if __name__ == "__main__":

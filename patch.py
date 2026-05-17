@@ -47,12 +47,17 @@ def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
         return _refresh(db, user)
 
     if pending and action.action == "create":
+        if pending.get("kind") == "create" and action.event and not action.event.title:
+            state.clear_pending(db, user)
+            return _create(db, user, action.event, message)
         return _correction(db, user, pending, action.event, message)
 
     if action.action == "create":
         return _create(db, user, action.event, message)
 
     if action.action == "update":
+        if pending and pending.get("kind") == "create":
+            state.clear_pending(db, user)
         return _update(db, user, action.target_query, action.event, message)
 
     if action.action == "delete":
@@ -94,12 +99,12 @@ def _confirm(db, user, pending):
             return _execute_update(db, user, pending)
         if kind == "delete":
             return _execute_delete(db, user, pending)
-    except Exception:
         state.clear_pending(db, user)
         return formatted.error()
-
-    state.clear_pending(db, user)
-    return formatted.error()
+    except Exception as e:
+        print(f"[confirm error] kind={kind} error={type(e).__name__}: {e}")
+        state.clear_pending(db, user)
+        return "Something went wrong and your calendar wasn't updated. Try again."
 
 
 def _cancel(db, user, pending):
