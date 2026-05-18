@@ -108,3 +108,7 @@ def verify_whatsapp_signature(req) -> bool:
         hashlib.sha256,
     ).hexdigest()
     return hmac.compare_digest(signature[7:], expected)
+
+
+class AuthExpiredError(Exception):
+    pass

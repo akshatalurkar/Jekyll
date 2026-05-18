@@ -75,7 +75,7 @@ def process_user(user):
             continue
 
         event_id = event["id"]
-        marker = f"{event_id}:{minutes}"
+        marker = f"{event_id}:{minutes}:{event['start']['dateTime']}"
         if SentReminder.query.filter_by(user_id=user.id, event_id=marker).first():
             continue
 

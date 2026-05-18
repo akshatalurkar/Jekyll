@@ -14,7 +14,7 @@ from .core import (
     app, db, User, ProcessedMessage, SentReminder,
     send_whatsapp, verify_whatsapp_signature,
     encrypt_token, normalize_phone,
-    BASE_URL, NOTION_URL,
+    BASE_URL, NOTION_URL, AuthExpiredError,
 )
 from . import state, parse, patch
 
@@ -86,8 +86,9 @@ def webhook():
     try:
         msg = body["entry"][0]["changes"][0]["value"]["messages"][0]
         phone = normalize_phone(msg["from"])
-        text = msg["text"]["body"].strip()
         message_id = msg["id"]
+        msg_type = msg.get("type")
+        text = msg["text"]["body"].strip() if msg_type == "text" else None
     except (KeyError, IndexError, TypeError):
         return "OK", 200
 
@@ -97,6 +98,10 @@ def webhook():
     cutoff = datetime.now(timezone.utc) - timedelta(days=7)
     ProcessedMessage.query.filter(ProcessedMessage.created_at < cutoff).delete()
     db.session.commit()
+
+    if text is None:
+        send_whatsapp(phone, "File not supported. Please send text only.")
+        return "OK", 200
 
     user = User.query.filter_by(phone=phone).first()
     if not user or not user.oauth_token:
@@ -117,17 +122,42 @@ def webhook():
         lowered = text.strip().lower()
         YES = {"yes", "yeah", "yep", "yup", "ok", "okay", "sure", "do it", "confirm", "correct", "y"}
         NO = {"no", "nope", "never mind", "nevermind", "cancel", "stop", "forget it", "n"}
-        if pending and lowered in YES:
-            action = CalendarAction(action="confirm")
-        elif pending and lowered in NO:
-            action = CalendarAction(action="cancel")
-        else:
-            action = parse.parse(text, pending)
-        reply = patch.dispatch(db, user, action, message=text)
+
+        reply = None
+
+        if pending and pending.get("kind") == "disambiguate":
+            matches = pending.get("matches", [])
+            if lowered in NO:
+                state.clear_pending(db, user)
+                reply = "Cancelled."
+            elif lowered == "all" or (lowered.isdigit() and 1 <= int(lowered) <= len(matches)):
+                reply = patch.resolve_disambiguate(db, user, pending, lowered)
+            else:
+                state.clear_pending(db, user)
+                pending = None
+
+        if reply is None:
+            if pending and lowered in YES:
+                action = CalendarAction(action="confirm")
+            elif pending and lowered in NO:
+                action = CalendarAction(action="cancel")
+            else:
+                action = parse.parse(text, pending)
+            reply = patch.dispatch(db, user, action, message=text)
+
         if TEST_MODE:
             return reply, 200
         send_whatsapp(user.phone, reply)
         return "", 200
+    except AuthExpiredError:
+        try:
+            msg = f"Your Google Calendar connection expired. Reconnect here: {BASE_URL}/auth/{phone}"
+            if TEST_MODE:
+                return msg, 401
+            send_whatsapp(phone, msg)
+        except Exception:
+            pass
+        return "OK", 200
     except Exception as e:
         traceback.print_exc()
         try:

@@ -6,7 +6,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
-from .core import encrypt_token, decrypt_token, db
+from .core import encrypt_token, decrypt_token, db, AuthExpiredError
 
 import os
 
@@ -30,9 +30,12 @@ def get_service(user):
         client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
     )
     if creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        user.oauth_token = encrypt_token(creds.token)
-        db.session.commit()
+        try:
+            creds.refresh(Request())
+            user.oauth_token = encrypt_token(creds.token)
+            db.session.commit()
+        except Exception:
+            raise AuthExpiredError()
     return build("calendar", "v3", credentials=creds)
 
 
@@ -71,7 +74,7 @@ def resolve_calendar(user, service, hint):
     if not calendars:
         return "primary", "Default"
     best = max(calendars, key=lambda c: _calendar_similarity(hint, c["name"]))
-    if _calendar_similarity(hint, best["name"]) >= 0.6:
+    if _calendar_similarity(hint, best["name"]) >= 0.75:
         return best["id"], best["name"]
     return None
 
@@ -139,31 +142,45 @@ def find_conflicts(user, service, date, time, duration_minutes, exclude_event_id
     return conflicts
 
 
-def find_upcoming_event(user, service, keyword):
+def find_matching_events(user, service, keyword, max_results=50):
     if not keyword:
-        return None
-    now_iso = datetime.now(timezone.utc).isoformat()
+        return []
+
+    today_start = datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
+    today_start_utc = today_start.astimezone(timezone.utc).isoformat()
+
     keywords = [keyword.lower()]
     words = keyword.lower().split()
     if len(words) > 1:
         keywords += [" ".join(words[:i]) for i in range(len(words) - 1, 0, -1)]
 
+    matches = []
+    seen_ids = set()
+
     for cal in get_user_calendars(user, service):
-        events = service.events().list(
-            calendarId=cal["id"],
-            timeMin=now_iso,
-            maxResults=30,
-            singleEvents=True,
-            orderBy="startTime",
-        ).execute().get("items", [])
+        try:
+            events = service.events().list(
+                calendarId=cal["id"],
+                timeMin=today_start_utc,
+                maxResults=max_results,
+                singleEvents=True,
+                orderBy="startTime",
+            ).execute().get("items", [])
+        except Exception:
+            continue
 
         for ev in events:
+            ev_id = ev.get("id")
+            if ev_id in seen_ids:
+                continue
             title = ev.get("summary", "").lower()
             if any(kw in title for kw in keywords):
                 ev["_calendar_id"] = cal["id"]
                 ev["_calendar_name"] = cal["name"]
-                return ev
-    return None
+                matches.append(ev)
+                seen_ids.add(ev_id)
+
+    return matches
 
 
 def list_events_for_day(user, service, day_iso):

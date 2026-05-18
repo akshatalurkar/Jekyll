@@ -209,3 +209,24 @@ def not_found(keyword):
 
 def error():
     return "Something went wrong. Try again."
+
+
+def disambiguate(matches, intent):
+    verb = {"delete": "remove", "update": "edit", "detail": "view details for"}.get(intent, "select")
+    lines = [f"I found a few matches. Which would you like to {verb}?", ""]
+    for i, m in enumerate(matches, 1):
+        lines.append(f"{i}. *{m['title']}* — {m['when']} ({m['calendar_name']})")
+    lines.append("")
+    if intent == "delete":
+        lines.append("Reply with a number, *All* to remove all, or *No* to cancel.")
+    else:
+        lines.append("Reply with a number or *No* to cancel.")
+    return "\n".join(lines)
+
+
+def recurring_delete_warning(title):
+    return f"⚠️ *{title}* is part of a recurring series. This will only remove this one occurrence."
+
+
+def recurring_update_warning(title):
+    return f"⚠️ *{title}* is part of a recurring series. This will only update this one occurrence."

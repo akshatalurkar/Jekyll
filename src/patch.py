@@ -27,13 +27,76 @@ def _calendar_from_text(message):
         return m.group(1).strip(" .")
     return None
 
+
 def _resolve_reminder(reminder_at, event_date, event_time):
     if not reminder_at:
-        return None
+        return None, None
     start = datetime.strptime(f"{event_date} {event_time}", "%Y-%m-%d %H:%M")
     rem = datetime.strptime(f"{event_date} {reminder_at}", "%Y-%m-%d %H:%M")
     minutes = int((start - rem).total_seconds() / 60)
-    return minutes
+    if minutes < 0:
+        return 0, "That reminder time is after the event starts — set to the start of the event instead."
+    return minutes, None
+
+
+def _make_match_summary(match):
+    start_raw = match["start"].get("dateTime") or match["start"].get("date")
+    is_all_day = "dateTime" not in match["start"]
+    if is_all_day:
+        dt = datetime.strptime(start_raw, "%Y-%m-%d")
+        when = dt.strftime("%a %b %-d") + " (all day)"
+    else:
+        dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00")).astimezone(TZ)
+        when = dt.strftime("%a %b %-d at %-I:%M%p").lower()
+    return {
+        "id": match["id"],
+        "calendar_id": match.get("_calendar_id"),
+        "calendar_name": match.get("_calendar_name", "Default"),
+        "title": match.get("summary", "(untitled)"),
+        "when": when,
+        "recurring_event_id": match.get("recurringEventId"),
+        "event_dict": _event_to_dict(match) if not is_all_day else None,
+    }
+
+
+def _event_to_dict(gcal_event):
+    start_raw = gcal_event["start"].get("dateTime") or gcal_event["start"].get("date")
+    end_raw = gcal_event["end"].get("dateTime") or gcal_event["end"].get("date")
+    is_all_day = "dateTime" not in gcal_event["start"]
+    if is_all_day:
+        start_dt = datetime.strptime(start_raw, "%Y-%m-%d").replace(tzinfo=TZ)
+        end_dt = datetime.strptime(end_raw, "%Y-%m-%d").replace(tzinfo=TZ)
+    else:
+        start_dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00")).astimezone(TZ)
+        end_dt = datetime.fromisoformat(end_raw.replace("Z", "+00:00")).astimezone(TZ)
+    overrides = gcal_event.get("reminders", {}).get("overrides", [])
+    reminder_minutes = overrides[0]["minutes"] if overrides else None
+    return {
+        "title": gcal_event.get("summary", "(untitled)"),
+        "date": start_dt.strftime("%Y-%m-%d"),
+        "time": start_dt.strftime("%H:%M"),
+        "duration_minutes": int((end_dt - start_dt).total_seconds() / 60),
+        "location": gcal_event.get("location") or "",
+        "calendar_id": gcal_event["_calendar_id"],
+        "calendar_name": gcal_event["_calendar_name"],
+        "reminder_minutes": reminder_minutes,
+        "is_all_day": is_all_day,
+    }
+
+
+def _with_pending_reminder(pending, response):
+    if not pending:
+        return response
+    kind = pending.get("kind")
+    if kind == "disambiguate":
+        return response + "\n\n_(Still waiting for your selection. Reply with a number or *No* to cancel.)_"
+    event = pending.get("event") or {}
+    title = event.get("title")
+    if not title:
+        return response
+    verb = {"create": "add", "update": "update", "delete": "remove"}.get(kind, "confirm")
+    return response + f"\n\n_(Still waiting to {verb} *{title}*. Reply *Yes* or *No*.)_"
+
 
 def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
     pending = state.get_pending(user)
@@ -51,12 +114,20 @@ def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
         return _cancel(db, user, pending)
 
     if action.action == "refresh":
-        return _refresh(db, user)
+        return _with_pending_reminder(pending, _refresh(db, user))
 
     if pending and action.action == "create":
-        if pending.get("kind") == "create" and action.event and action.event.title:
+        if action.event and action.event.title:
+            old_title = (pending.get("event") or {}).get("title")
+            old_kind = pending.get("kind")
             state.clear_pending(db, user)
-            return _create(db, user, action.event, message)
+            result = _create(db, user, action.event, message)
+            if old_title and old_kind in ("create", "update", "delete"):
+                verb = {"create": "scheduling", "update": "editing", "delete": "removing"}.get(old_kind, "pending action for")
+                result = f"_(Setting aside {verb} *{old_title}*.)_\n\n" + result
+            elif old_kind == "disambiguate":
+                result = "_(Setting aside your previous selection.)_\n\n" + result
+            return result
         return _correction(db, user, pending, action.event, message)
 
     if action.action == "create":
@@ -71,13 +142,117 @@ def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
         return _delete(db, user, action.target_query)
 
     if action.action == "list":
-        return _list(user, action.list_date)
+        return _with_pending_reminder(pending, _list(user, action.list_date))
 
     if action.action == "detail":
-        return _detail(user, action.target_query)
+        return _with_pending_reminder(pending, _detail(user, action.target_query))
 
     if action.action == "list_calendars":
-        return _list_calendars(user)
+        return _with_pending_reminder(pending, _list_calendars(user))
+
+    return formatted.error()
+
+
+def resolve_disambiguate(db, user, pending, selection):
+    intent = pending.get("intent")
+    matches = pending.get("matches", [])
+    service = calendar_ops.get_service(user)
+
+    if selection == "all":
+        if intent != "delete":
+            return "You can only remove all matches at once, not edit or view them all."
+        titles = []
+        for m in matches:
+            try:
+                calendar_ops.delete_event(service, m["calendar_id"], m["id"])
+                titles.append(m["title"])
+            except Exception:
+                pass
+        state.clear_pending(db, user)
+        if not titles:
+            return "Couldn't remove any of those events. Try again."
+        if len(titles) == 1:
+            return formatted.delete_success(titles[0])
+        return "✓ Removed: " + ", ".join(f"*{t}*" for t in titles)
+
+    idx = int(selection) - 1
+    m = matches[idx]
+    state.clear_pending(db, user)
+
+    if intent == "delete":
+        payload = {
+            "kind": "delete",
+            "event_id": m["id"],
+            "calendar_id": m["calendar_id"],
+            "title": m["title"],
+            "when": m["when"],
+        }
+        state.set_pending(db, user, payload)
+        result = formatted.delete_confirmation(m["title"], m["when"])
+        if m.get("recurring_event_id"):
+            result = formatted.recurring_delete_warning(m["title"]) + "\n\n" + result
+        return result
+
+    if intent == "update":
+        event_dict = m.get("event_dict")
+        if not event_dict:
+            return "I can't edit all-day events. Try a timed event instead."
+        changes_dump = pending.get("changes_dump", {})
+        cal_hint = pending.get("cal_hint")
+
+        new_cal_id = event_dict["calendar_id"]
+        new_cal_name = event_dict["calendar_name"]
+        if cal_hint:
+            resolved = calendar_ops.resolve_calendar(user, service, cal_hint)
+            if resolved is None:
+                return formatted.clarify(
+                    f"Couldn't find a calendar matching '{cal_hint}'. "
+                    "Reply *refresh* to sync, or *what calendars do I have* to see your options."
+                )
+            new_cal_id, new_cal_name = resolved
+
+        new_event = {**event_dict}
+        for k, v in changes_dump.items():
+            if k in ("calendar", "reminder_at"):
+                continue
+            new_event[k] = v
+        new_event["calendar_id"] = new_cal_id
+        new_event["calendar_name"] = new_cal_name
+
+        reminder_at = changes_dump.get("reminder_at")
+        if not changes_dump.get("reminder_minutes") and reminder_at:
+            mins, rem_warn = _resolve_reminder(reminder_at, new_event["date"], new_event["time"])
+            new_event["reminder_minutes"] = mins
+
+        warning, conflicts = _detect_warning(user, service, new_event, exclude_event_id=m["id"])
+        payload = {
+            "kind": "update",
+            "event_id": m["id"],
+            "event": new_event,
+            "original": event_dict,
+            "warning": warning,
+        }
+        if conflicts:
+            payload["conflicts"] = conflicts
+        state.set_pending(db, user, payload)
+
+        diff_lines = _build_update_diff(event_dict, new_event)
+        result = formatted.update_confirmation(event_dict["title"], diff_lines, conflicts)
+        if m.get("recurring_event_id"):
+            result = formatted.recurring_update_warning(m["title"]) + "\n\n" + result
+        return result
+
+    if intent == "detail":
+        try:
+            event = service.events().get(
+                calendarId=m["calendar_id"],
+                eventId=m["id"],
+            ).execute()
+            event["_calendar_id"] = m["calendar_id"]
+            event["_calendar_name"] = m["calendar_name"]
+            return formatted.event_detail(event)
+        except Exception:
+            return formatted.not_found(m["title"])
 
     return formatted.error()
 
@@ -94,9 +269,6 @@ def _refresh(db, user):
 def _confirm(db, user, pending):
     if not pending:
         return formatted.nothing_pending()
-    if state.is_stale(user):
-        state.clear_pending(db, user)
-        return formatted.pending_timed_out()
 
     kind = pending.get("kind")
     try:
@@ -139,7 +311,7 @@ def _create(db, user, event_fields, message=""):
     if resolved is None:
         return formatted.clarify(
             f"Couldn't find a calendar matching '{cal_hint}'. "
-            f"Text 'what calendars do I have' to see your options."
+            "Reply *refresh* to sync, or *what calendars do I have* to see your options."
         )
     cal_id, cal_name = resolved
 
@@ -158,8 +330,10 @@ def _create(db, user, event_fields, message=""):
         state.set_pending(db, user, {"kind": "create", "event": event, "warning": None})
         return formatted.clarify("What date and time?")
 
+    reminder_warning = None
     if not event.get("reminder_minutes") and event_fields.reminder_at:
-        event["reminder_minutes"] = _resolve_reminder(event_fields.reminder_at, event["date"], event["time"])
+        mins, reminder_warning = _resolve_reminder(event_fields.reminder_at, event["date"], event["time"])
+        event["reminder_minutes"] = mins
 
     warning, conflicts = _detect_warning(user, service, event)
     payload = {"kind": "create", "event": event, "warning": warning}
@@ -167,7 +341,10 @@ def _create(db, user, event_fields, message=""):
         payload["conflicts"] = conflicts
 
     state.set_pending(db, user, payload)
-    return formatted.create_confirmation(event, warning, conflicts)
+    result = formatted.create_confirmation(event, warning, conflicts)
+    if reminder_warning:
+        result = f"⚠️ {reminder_warning}\n\n" + result
+    return result
 
 
 def _correction(db, user, pending, event_fields, message=""):
@@ -193,7 +370,7 @@ def _correction(db, user, pending, event_fields, message=""):
         if resolved is None:
             return formatted.clarify(
                 f"Couldn't find a calendar matching '{cal_hint}'. "
-                f"Text 'what calendars do I have' to see your options."
+                "Reply *refresh* to sync, or *what calendars do I have* to see your options."
             )
         merged["calendar_id"], merged["calendar_name"] = resolved
     merged.pop("calendar", None)
@@ -208,9 +385,11 @@ def _correction(db, user, pending, event_fields, message=""):
         if not merged.get("date") or not merged.get("time"):
             state.set_pending(db, user, {"kind": "create", "event": merged, "warning": None})
             return formatted.clarify("What date and time?")
-        
+
+        reminder_warning = None
         if not merged.get("reminder_minutes") and event_fields.reminder_at:
-            merged["reminder_minutes"] = _resolve_reminder(event_fields.reminder_at, merged["date"], merged["time"])
+            mins, reminder_warning = _resolve_reminder(event_fields.reminder_at, merged["date"], merged["time"])
+            merged["reminder_minutes"] = mins
 
         service = calendar_ops.get_service(user)
         warning, conflicts = _detect_warning(user, service, merged)
@@ -218,18 +397,26 @@ def _correction(db, user, pending, event_fields, message=""):
         if conflicts:
             payload["conflicts"] = conflicts
         state.set_pending(db, user, payload)
-        return formatted.create_confirmation(merged, warning, conflicts)
+        result = formatted.create_confirmation(merged, warning, conflicts)
+        if reminder_warning:
+            result = f"⚠️ {reminder_warning}\n\n" + result
+        return result
 
     if kind == "update":
+        service = calendar_ops.get_service(user)
+        warning, conflicts = _detect_warning(user, service, merged, exclude_event_id=pending["event_id"])
         payload = {
             "kind": "update",
             "event_id": pending["event_id"],
             "event": merged,
             "original": pending["original"],
+            "warning": warning,
         }
+        if conflicts:
+            payload["conflicts"] = conflicts
         state.set_pending(db, user, payload)
         diff_lines = _build_update_diff(pending["original"], merged)
-        return formatted.update_confirmation(pending["original"]["title"], diff_lines, None)
+        return formatted.update_confirmation(pending["original"]["title"], diff_lines, conflicts)
 
     return formatted.error()
 
@@ -302,9 +489,27 @@ def _update(db, user, target_query, changes, message=""):
         return formatted.clarify("What would you like to change?")
 
     service = calendar_ops.get_service(user)
-    match = calendar_ops.find_upcoming_event(user, service, target_query)
-    if not match:
+    matches = calendar_ops.find_matching_events(user, service, target_query)
+    if not matches:
         return formatted.not_found(target_query)
+
+    if len(matches) > 1:
+        summaries = [_make_match_summary(m) for m in matches]
+        payload = {
+            "kind": "disambiguate",
+            "intent": "update",
+            "matches": summaries,
+            "changes_dump": changes.model_dump(exclude_none=True),
+            "cal_hint": cal_hint,
+            "message": message,
+        }
+        state.set_pending(db, user, payload)
+        return formatted.disambiguate(summaries, "update")
+
+    match = matches[0]
+
+    if "dateTime" not in match.get("start", {}):
+        return formatted.clarify("I can't edit all-day events. Try a timed event instead.")
 
     original = _event_to_dict(match)
 
@@ -315,20 +520,22 @@ def _update(db, user, target_query, changes, message=""):
         if resolved is None:
             return formatted.clarify(
                 f"Couldn't find a calendar matching '{cal_hint}'. "
-                f"Text 'what calendars do I have' to see your options."
+                "Reply *refresh* to sync, or *what calendars do I have* to see your options."
             )
         new_cal_id, new_cal_name = resolved
 
     new_event = {**original}
     for k, v in changes.model_dump(exclude_none=True).items():
-        if k == "calendar":
+        if k in ("calendar", "reminder_at"):
             continue
         new_event[k] = v
     new_event["calendar_id"] = new_cal_id
     new_event["calendar_name"] = new_cal_name
 
+    reminder_warning = None
     if not changes.model_dump(exclude_none=True).get("reminder_minutes") and getattr(changes, "reminder_at", None):
-        new_event["reminder_minutes"] = _resolve_reminder(changes.reminder_at, new_event["date"], new_event["time"])
+        mins, reminder_warning = _resolve_reminder(changes.reminder_at, new_event["date"], new_event["time"])
+        new_event["reminder_minutes"] = mins
 
     warning, conflicts = _detect_warning(user, service, new_event, exclude_event_id=match["id"])
     payload = {
@@ -343,7 +550,12 @@ def _update(db, user, target_query, changes, message=""):
     state.set_pending(db, user, payload)
 
     diff_lines = _build_update_diff(original, new_event)
-    return formatted.update_confirmation(original["title"], diff_lines, conflicts)
+    result = formatted.update_confirmation(original["title"], diff_lines, conflicts)
+    if match.get("recurringEventId"):
+        result = formatted.recurring_update_warning(original["title"]) + "\n\n" + result
+    if reminder_warning:
+        result = f"⚠️ {reminder_warning}\n\n" + result
+    return result
 
 
 def _build_update_diff(original, new_event):
@@ -411,13 +623,28 @@ def _delete(db, user, target_query):
         return formatted.clarify("Which event should I remove?")
 
     service = calendar_ops.get_service(user)
-    match = calendar_ops.find_upcoming_event(user, service, target_query)
-    if not match:
+    matches = calendar_ops.find_matching_events(user, service, target_query)
+    if not matches:
         return formatted.not_found(target_query)
 
-    start = match["start"].get("dateTime") or match["start"].get("date")
-    dt = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone(TZ)
-    when = dt.strftime("%a %b %-d at %-I:%M%p").lower()
+    if len(matches) > 1:
+        summaries = [_make_match_summary(m) for m in matches]
+        payload = {
+            "kind": "disambiguate",
+            "intent": "delete",
+            "matches": summaries,
+        }
+        state.set_pending(db, user, payload)
+        return formatted.disambiguate(summaries, "delete")
+
+    match = matches[0]
+    start_raw = match["start"].get("dateTime") or match["start"].get("date")
+    if "dateTime" in match["start"]:
+        dt = datetime.fromisoformat(start_raw.replace("Z", "+00:00")).astimezone(TZ)
+        when = dt.strftime("%a %b %-d at %-I:%M%p").lower()
+    else:
+        dt = datetime.strptime(start_raw, "%Y-%m-%d")
+        when = dt.strftime("%a %b %-d") + " (all day)"
 
     payload = {
         "kind": "delete",
@@ -427,7 +654,10 @@ def _delete(db, user, target_query):
         "when": when,
     }
     state.set_pending(db, user, payload)
-    return formatted.delete_confirmation(payload["title"], when)
+    result = formatted.delete_confirmation(payload["title"], when)
+    if match.get("recurringEventId"):
+        result = formatted.recurring_delete_warning(payload["title"]) + "\n\n" + result
+    return result
 
 
 def _execute_delete(db, user, pending):
@@ -463,9 +693,17 @@ def _detail(user, target_query):
         return formatted.clarify("Which event?")
 
     service = calendar_ops.get_service(user)
-    match = calendar_ops.find_upcoming_event(user, service, target_query)
-    if not match:
+    matches = calendar_ops.find_matching_events(user, service, target_query)
+    if not matches:
         return formatted.not_found(target_query)
+
+    if len(matches) > 1:
+        summaries = [_make_match_summary(m) for m in matches]
+        return formatted.disambiguate(summaries, "detail")
+
+    match = matches[0]
+    match["_calendar_id"] = match.get("_calendar_id")
+    match["_calendar_name"] = match.get("_calendar_name", "Default")
     return formatted.event_detail(match)
 
 
@@ -473,22 +711,3 @@ def _list_calendars(user):
     service = calendar_ops.get_service(user)
     calendars = calendar_ops.get_user_calendars(user, service)
     return formatted.calendar_names([c["name"] for c in calendars])
-
-
-def _event_to_dict(gcal_event):
-    start = gcal_event["start"].get("dateTime") or gcal_event["start"].get("date")
-    end = gcal_event["end"].get("dateTime") or gcal_event["end"].get("date")
-    start_dt = datetime.fromisoformat(start.replace("Z", "+00:00")).astimezone(TZ)
-    end_dt = datetime.fromisoformat(end.replace("Z", "+00:00")).astimezone(TZ)
-    overrides = gcal_event.get("reminders", {}).get("overrides", [])
-    reminder_minutes = overrides[0]["minutes"] if overrides else None
-    return {
-        "title": gcal_event.get("summary", "(untitled)"),
-        "date": start_dt.strftime("%Y-%m-%d"),
-        "time": start_dt.strftime("%H:%M"),
-        "duration_minutes": int((end_dt - start_dt).total_seconds() / 60),
-        "location": gcal_event.get("location") or "",
-        "calendar_id": gcal_event["_calendar_id"],
-        "calendar_name": gcal_event["_calendar_name"],
-        "reminder_minutes": reminder_minutes,
-    }

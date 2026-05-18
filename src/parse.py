@@ -28,7 +28,16 @@ ACTIONS:
 - confirm: bare yes (yes, yeah, yep, ok, sure, do it, confirm, correct)
 - cancel: bare no (no, nope, never mind, forget it, cancel, stop, don't)
 - reject: message is not about calendar/scheduling
-- clarify: scheduling intent but missing critical info; put a SHORT question in `clarification`
+- clarify: scheduling intent but missing critical info
+
+EXTRACTION RULES:
+1. CALENDAR NAME: If the user mentions a specific calendar (e.g., "on my Work calendar", 
+   "to Personal", "put this in Gym"), extract the name into the 'calendar' field. 
+   Do not include the word 'calendar' in the string.
+2. CONTEXT SWITCHING: If the user has a pending action but provides a brand-new 
+   event request (e.g., they were editing 'Lunch' but now say 'Schedule Gym for 5pm'), 
+   set action to 'create' and fill the new event details. Use the 'create' action 
+   to override the previous flow.
 
 PENDING STATE RULES:
 - If pending state exists and user types event fields without a verb ("4pm", "make it Starbucks", "30 min instead") → action=create. It is a correction.
@@ -79,6 +88,10 @@ PER ACTION:
 - detail → `target_query` = search keyword.
 - list → `list_date` = YYYY-MM-DD for the SPECIFIC day they asked about. If they name any day (Friday, Monday, May 20), resolve it to that exact date — never substitute today's date even if it happens to be that day. If they say a vague range ("next week", "this weekend"), set `list_date` to null.
 - refresh → no additional fields needed.
+
+RECURRING EVENTS:
+- If the user asks to create/schedule a recurring event ("every week", "every day", "daily", "weekly", "monthly", "every Monday", "biweekly", etc.) return action="clarify" with clarification="I can only schedule one-time events. Would you like to schedule [extracted title, or 'that'] for a specific date?"
+- For delete or update of a recurring event, proceed normally — the caller handles the recurring warning.
 
 JSON only. No prose, no markdown fences."""
 
