@@ -2,7 +2,7 @@
 
 ## About the Project
 
-Jekyll is a Google Calendar assistant native to WhatsApp. You can schedule events, check your day, and get reminders without leaving the chat you already use.
+Jekyll is a Google Calendar assistant native to WhatsApp. You can schedule events, check your day, and get reminders without leaving the chat you already use. See our [Notion](https://www.notion.so/Jekyll-3632b89f0b39807c86cef78c349e4ee8?pvs=12) to learn more.
 
 ### Built With
 
