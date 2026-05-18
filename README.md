@@ -182,7 +182,7 @@ Both services share the same Postgres database. Use Railway's shared variables s
 
 ## Contact
 
-Akshat Alurkar - aalurkar05@gmail.com - [LinkedIn](https://linkedin.com/in/akshat-alurkar)
+Akshat Alurkar - aalurkar05@gmail.com - [LinkedIn](https://linkedin.com/in/akshatalurkar)
 Aanya Soni - aanya.soni@gmail.com - [LinkedIn](https://linkedin.com/in/aanyasonii)
 
 Project Link: [https://github.com/aalurkar/jekyll](https://github.com/aalurkar/jekyll)
