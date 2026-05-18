@@ -11,6 +11,7 @@ TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_DURATION_MINUTES = 60
 DEFAULT_REMINDER_MINUTES = 30
 LIST_SCOPE_DAYS = 1
+MAX_DISAMBIG = 5
 
 _CAL_TO_X = re.compile(r"calendars?\s+to\s+(.+)", re.I)
 _TO_X_CAL = re.compile(r"\bto\s+(?:the\s+|my\s+)?(.+?)\s+calendars?\b", re.I)
@@ -145,7 +146,7 @@ def dispatch(db, user, action: CalendarAction, message: str = "") -> str:
         return _with_pending_reminder(pending, _list(user, action.list_date))
 
     if action.action == "detail":
-        return _with_pending_reminder(pending, _detail(user, action.target_query))
+        return _with_pending_reminder(pending, _detail(db, user, action.target_query))
 
     if action.action == "list_calendars":
         return _with_pending_reminder(pending, _list_calendars(user))
@@ -161,19 +162,15 @@ def resolve_disambiguate(db, user, pending, selection):
     if selection == "all":
         if intent != "delete":
             return "You can only remove all matches at once, not edit or view them all."
-        titles = []
-        for m in matches:
-            try:
-                calendar_ops.delete_event(service, m["calendar_id"], m["id"])
-                titles.append(m["title"])
-            except Exception:
-                pass
-        state.clear_pending(db, user)
-        if not titles:
-            return "Couldn't remove any of those events. Try again."
-        if len(titles) == 1:
-            return formatted.delete_success(titles[0])
-        return "✓ Removed: " + ", ".join(f"*{t}*" for t in titles)
+        titles_preview = ", ".join(f"*{m['title']}*" for m in matches)
+        payload = {
+            "kind": "bulk_delete",
+            "matches": matches,
+        }
+        state.set_pending(db, user, payload)
+        count = len(matches)
+        noun = "event" if count == 1 else "events"
+        return f"Remove all {count} {noun} ({titles_preview})?\n\n*Yes* / *No*"
 
     idx = int(selection) - 1
     m = matches[idx]
@@ -197,6 +194,19 @@ def resolve_disambiguate(db, user, pending, selection):
         event_dict = m.get("event_dict")
         if not event_dict:
             return "I can't edit all-day events. Try a timed event instead."
+        # Re-fetch to get current state — stored snapshot may be stale
+        try:
+            fresh = service.events().get(
+                calendarId=m["calendar_id"],
+                eventId=m["id"],
+            ).execute()
+            fresh["_calendar_id"] = m["calendar_id"]
+            fresh["_calendar_name"] = m["calendar_name"]
+            if "dateTime" in fresh.get("start", {}):
+                event_dict = _event_to_dict(fresh)
+        except Exception:
+            pass  # Fall back to stored snapshot on fetch failure
+
         changes_dump = pending.get("changes_dump", {})
         cal_hint = pending.get("cal_hint")
 
@@ -278,6 +288,8 @@ def _confirm(db, user, pending):
             return _execute_update(db, user, pending)
         if kind == "delete":
             return _execute_delete(db, user, pending)
+        if kind == "bulk_delete":
+            return _execute_bulk_delete(db, user, pending)
         state.clear_pending(db, user)
         return formatted.error()
     except Exception as e:
@@ -291,7 +303,7 @@ def _cancel(db, user, pending):
         return formatted.nothing_pending()
     kind = pending.get("kind")
     state.clear_pending(db, user)
-    if kind == "delete":
+    if kind in ("delete", "bulk_delete"):
         return formatted.cancelled_delete()
     if kind == "update":
         return formatted.cancelled_update()
@@ -358,6 +370,8 @@ def _correction(db, user, pending, event_fields, message=""):
     current = pending.get("event", {})
     merged = {**current}
     for k, v in event_fields.model_dump(exclude_none=True).items():
+        if k in ("calendar", "reminder_at"):
+            continue
         merged[k] = v
 
     cal_hint = event_fields.calendar
@@ -375,7 +389,7 @@ def _correction(db, user, pending, event_fields, message=""):
         merged["calendar_id"], merged["calendar_name"] = resolved
     merged.pop("calendar", None)
 
-    if merged == current:
+    if merged == current and not event_fields.reminder_at:
         return formatted.clarify(
             "I didn't catch a change. You can adjust the time, date, "
             "calendar, location, duration, or reminder."
@@ -387,7 +401,7 @@ def _correction(db, user, pending, event_fields, message=""):
             return formatted.clarify("What date and time?")
 
         reminder_warning = None
-        if not merged.get("reminder_minutes") and event_fields.reminder_at:
+        if event_fields.reminder_at:
             mins, reminder_warning = _resolve_reminder(event_fields.reminder_at, merged["date"], merged["time"])
             merged["reminder_minutes"] = mins
 
@@ -403,6 +417,11 @@ def _correction(db, user, pending, event_fields, message=""):
         return result
 
     if kind == "update":
+        reminder_warning = None
+        if event_fields.reminder_at and merged.get("date") and merged.get("time"):
+            mins, reminder_warning = _resolve_reminder(event_fields.reminder_at, merged["date"], merged["time"])
+            merged["reminder_minutes"] = mins
+
         service = calendar_ops.get_service(user)
         warning, conflicts = _detect_warning(user, service, merged, exclude_event_id=pending["event_id"])
         payload = {
@@ -416,7 +435,10 @@ def _correction(db, user, pending, event_fields, message=""):
             payload["conflicts"] = conflicts
         state.set_pending(db, user, payload)
         diff_lines = _build_update_diff(pending["original"], merged)
-        return formatted.update_confirmation(pending["original"]["title"], diff_lines, conflicts)
+        result = formatted.update_confirmation(pending["original"]["title"], diff_lines, conflicts)
+        if reminder_warning:
+            result = f"⚠️ {reminder_warning}\n\n" + result
+        return result
 
     return formatted.error()
 
@@ -494,7 +516,8 @@ def _update(db, user, target_query, changes, message=""):
         return formatted.not_found(target_query)
 
     if len(matches) > 1:
-        summaries = [_make_match_summary(m) for m in matches]
+        truncated = max(0, len(matches) - MAX_DISAMBIG)
+        summaries = [_make_match_summary(m) for m in matches[:MAX_DISAMBIG]]
         payload = {
             "kind": "disambiguate",
             "intent": "update",
@@ -504,7 +527,7 @@ def _update(db, user, target_query, changes, message=""):
             "message": message,
         }
         state.set_pending(db, user, payload)
-        return formatted.disambiguate(summaries, "update")
+        return formatted.disambiguate(summaries, "update", truncated)
 
     match = matches[0]
 
@@ -585,7 +608,6 @@ def _execute_update(db, user, pending):
     original = pending["original"]
 
     if new_event["calendar_id"] != original["calendar_id"]:
-        calendar_ops.delete_event(service, original["calendar_id"], pending["event_id"])
         calendar_ops.insert_event(
             service,
             calendar_id=new_event["calendar_id"],
@@ -596,6 +618,7 @@ def _execute_update(db, user, pending):
             location=new_event.get("location"),
             reminder_minutes=new_event.get("reminder_minutes"),
         )
+        calendar_ops.delete_event(service, original["calendar_id"], pending["event_id"])
     else:
         fields_to_patch = {}
         if new_event["title"] != original["title"]:
@@ -628,14 +651,15 @@ def _delete(db, user, target_query):
         return formatted.not_found(target_query)
 
     if len(matches) > 1:
-        summaries = [_make_match_summary(m) for m in matches]
+        truncated = max(0, len(matches) - MAX_DISAMBIG)
+        summaries = [_make_match_summary(m) for m in matches[:MAX_DISAMBIG]]
         payload = {
             "kind": "disambiguate",
             "intent": "delete",
             "matches": summaries,
         }
         state.set_pending(db, user, payload)
-        return formatted.disambiguate(summaries, "delete")
+        return formatted.disambiguate(summaries, "delete", truncated)
 
     match = matches[0]
     start_raw = match["start"].get("dateTime") or match["start"].get("date")
@@ -657,6 +681,25 @@ def _delete(db, user, target_query):
     result = formatted.delete_confirmation(payload["title"], when)
     if match.get("recurringEventId"):
         result = formatted.recurring_delete_warning(payload["title"]) + "\n\n" + result
+    return result
+
+
+def _execute_bulk_delete(db, user, pending):
+    service = calendar_ops.get_service(user)
+    titles = []
+    failed = []
+    for m in pending.get("matches", []):
+        try:
+            calendar_ops.delete_event(service, m["calendar_id"], m["id"])
+            titles.append(m["title"])
+        except Exception:
+            failed.append(m["title"])
+    state.clear_pending(db, user)
+    if not titles and failed:
+        return "Couldn't remove any of those events. Try again."
+    result = "✓ Removed: " + ", ".join(f"*{t}*" for t in titles)
+    if failed:
+        result += "\nCouldn't remove: " + ", ".join(f"*{t}*" for t in failed)
     return result
 
 
@@ -688,7 +731,7 @@ def _list(user, list_date):
     return formatted.list_grouped(label, date_label, events)
 
 
-def _detail(user, target_query):
+def _detail(db, user, target_query):
     if not target_query:
         return formatted.clarify("Which event?")
 
@@ -698,8 +741,14 @@ def _detail(user, target_query):
         return formatted.not_found(target_query)
 
     if len(matches) > 1:
-        summaries = [_make_match_summary(m) for m in matches]
-        return formatted.disambiguate(summaries, "detail")
+        truncated = max(0, len(matches) - MAX_DISAMBIG)
+        summaries = [_make_match_summary(m) for m in matches[:MAX_DISAMBIG]]
+        state.set_pending(db, user, {
+            "kind": "disambiguate",
+            "intent": "detail",
+            "matches": summaries,
+        })
+        return formatted.disambiguate(summaries, "detail", truncated)
 
     match = matches[0]
     match["_calendar_id"] = match.get("_calendar_id")

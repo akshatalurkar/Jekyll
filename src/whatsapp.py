@@ -5,6 +5,7 @@ from flask import request, session, render_template
 from requests_oauthlib import OAuth2Session
 import base64
 import hashlib
+import random
 import secrets
 import os
 
@@ -48,25 +49,33 @@ def auth(phone):
 def oauth_callback():
     phone = session.get("phone")
     code_verifier = session.get("code_verifier")
-    oauth = OAuth2Session(
-        client_id=os.getenv("GOOGLE_CLIENT_ID"),
-        redirect_uri=f"{BASE_URL}/oauth/callback",
-        state=session.get("state"),
-    )
-    token = oauth.fetch_token(
-        "https://oauth2.googleapis.com/token",
-        authorization_response=request.url,
-        client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
-        code_verifier=code_verifier,
-    )
-    user = User.query.filter_by(phone=phone).first()
-    if not user:
-        user = User(phone=phone)
-        db.session.add(user)
-    user.oauth_token = encrypt_token(token["access_token"])
-    user.refresh_token = encrypt_token(token.get("refresh_token"))
-    db.session.commit()
-    return render_template("success.html")
+
+    if not phone:
+        return "Session expired or invalid. Please request a new authorization link.", 400
+
+    try:
+        oauth = OAuth2Session(
+            client_id=os.getenv("GOOGLE_CLIENT_ID"),
+            redirect_uri=f"{BASE_URL}/oauth/callback",
+            state=session.get("state"),
+        )
+        token = oauth.fetch_token(
+            "https://oauth2.googleapis.com/token",
+            authorization_response=request.url,
+            client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
+            code_verifier=code_verifier,
+        )
+        user = User.query.filter_by(phone=phone).first()
+        if not user:
+            user = User(phone=phone)
+            db.session.add(user)
+        user.oauth_token = encrypt_token(token["access_token"])
+        user.refresh_token = encrypt_token(token.get("refresh_token"))
+        db.session.commit()
+        return render_template("success.html")
+    except Exception as e:
+        print(f"[oauth_callback] error for phone={phone}: {type(e).__name__}: {e}")
+        return "Authorization failed. Please try again.", 400
 
 
 @app.route("/webhook", methods=["GET", "POST"])
@@ -95,8 +104,9 @@ def webhook():
     if ProcessedMessage.query.filter_by(message_id=message_id).first():
         return "OK", 200
     db.session.add(ProcessedMessage(message_id=message_id))
-    cutoff = datetime.now(timezone.utc) - timedelta(days=7)
-    ProcessedMessage.query.filter(ProcessedMessage.created_at < cutoff).delete()
+    if random.random() < 0.01:
+        cutoff = datetime.now(timezone.utc) - timedelta(days=7)
+        ProcessedMessage.query.filter(ProcessedMessage.created_at < cutoff).delete()
     db.session.commit()
 
     if text is None:

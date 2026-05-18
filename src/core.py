@@ -96,7 +96,10 @@ def send_whatsapp(to: str, text: str) -> dict:
             "text": {"body": text},
         },
     )
-    return response.json()
+    data = response.json()
+    if not response.ok:
+        print(f"[send_whatsapp] failed to={to} status={response.status_code} body={data}")
+    return data
 
 def verify_whatsapp_signature(req) -> bool:
     signature = req.headers.get("X-Hub-Signature-256", "")

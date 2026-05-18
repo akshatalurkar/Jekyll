@@ -4,13 +4,27 @@ from datetime import datetime, timedelta, timezone
 from .core import app, db, User, SentReminder, send_whatsapp
 from . import calendar_ops
 
-WINDOW_MINUTES = 1
+LOOK_BACK_MINUTES = 2
+LOOK_AHEAD_MINUTES = 1
 DEFAULT_REMINDER_MINUTES = 30
 
 
 def _format_reminder(title, start_dt, minutes):
+    now = datetime.now(timezone.utc)
+    actual_secs = (start_dt - now).total_seconds()
     when = start_dt.astimezone(calendar_ops.TZ).strftime("%-I:%M%p").lower()
-    lead = f"{minutes} min" if minutes < 60 else f"{minutes // 60} hr"
+
+    if actual_secs <= 0:
+        return f"*{title}* is starting now."
+
+    actual_mins = int(actual_secs / 60)
+    if actual_mins < 60:
+        lead = f"{actual_mins} min"
+    elif actual_mins % 60 == 0:
+        lead = f"{actual_mins // 60} hr"
+    else:
+        lead = f"{actual_mins // 60} hr {actual_mins % 60} min"
+
     return f"*{title}* starts at {when} — in {lead}."
 
 
@@ -71,7 +85,9 @@ def process_user(user):
             event["start"]["dateTime"].replace("Z", "+00:00")
         )
         fire_at = start_dt - timedelta(minutes=minutes)
-        if not (now <= fire_at < now + timedelta(minutes=WINDOW_MINUTES)):
+        window_start = now - timedelta(minutes=LOOK_BACK_MINUTES)
+        window_end = now + timedelta(minutes=LOOK_AHEAD_MINUTES)
+        if not (window_start <= fire_at <= window_end):
             continue
 
         event_id = event["id"]

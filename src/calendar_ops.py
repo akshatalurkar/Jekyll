@@ -43,7 +43,7 @@ def get_user_calendars(user, service):
     stale = (
         not user.calendars
         or not user.calendars_updated_at
-        or datetime.now(timezone.utc) - user.calendars_updated_at.replace(tzinfo=timezone.utc)
+        or datetime.now(timezone.utc) - (user.calendars_updated_at if user.calendars_updated_at.tzinfo else user.calendars_updated_at.replace(tzinfo=timezone.utc))
             > timedelta(hours=CALENDAR_LIST_TTL_HOURS)
     )
     if stale:

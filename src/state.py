@@ -19,7 +19,10 @@ def get_pending(user) -> dict | None:
 def is_stale(user) -> bool:
     if not user.last_event_updated_at:
         return False
-    age = datetime.now(timezone.utc) - user.last_event_updated_at.replace(tzinfo=timezone.utc)
+    ts = user.last_event_updated_at
+    if ts.tzinfo is None:
+        ts = ts.replace(tzinfo=timezone.utc)
+    age = datetime.now(timezone.utc) - ts
     return age > timedelta(minutes=PENDING_TTL_MINUTES)
 
 

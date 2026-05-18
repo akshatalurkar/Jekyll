@@ -211,14 +211,16 @@ def error():
     return "Something went wrong. Try again."
 
 
-def disambiguate(matches, intent):
+def disambiguate(matches, intent, truncated=0):
     verb = {"delete": "remove", "update": "edit", "detail": "view details for"}.get(intent, "select")
     lines = [f"I found a few matches. Which would you like to {verb}?", ""]
     for i, m in enumerate(matches, 1):
         lines.append(f"{i}. *{m['title']}* — {m['when']} ({m['calendar_name']})")
+    if truncated:
+        lines.append(f"_(+ {truncated} more — try a more specific name to narrow it down)_")
     lines.append("")
     if intent == "delete":
-        lines.append("Reply with a number, *All* to remove all, or *No* to cancel.")
+        lines.append("Reply with a number, *All* to remove all shown, or *No* to cancel.")
     else:
         lines.append("Reply with a number or *No* to cancel.")
     return "\n".join(lines)
