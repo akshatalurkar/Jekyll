@@ -1,13 +1,11 @@
 # Jekyll
- 
+
 ## About the Project
- 
-Jekyll is a WhatsApp-native Google Calendar assistant. Schedule events, view your upcoming schedule, and get reminders all in the same chat.
- 
-[User Guide](https://www.notion.so/User-guide-for-Jekyll-35d2b89f0b3980faa54eccbd930609c0?source=copy_link)
- 
+
+Jekyll is a WhatsApp-native Google Calendar assistant. You can schedule events, check your day, and get reminders without leaving the chat you already use.
+
 ### Built With
- 
+
 [![Python][Python-shield]][Python-url]
 [![Flask][Flask-shield]][Flask-url]
 [![PostgreSQL][Postgres-shield]][Postgres-url]
@@ -15,60 +13,106 @@ Jekyll is a WhatsApp-native Google Calendar assistant. Schedule events, view you
 [![Google Calendar][GCal-shield]][GCal-url]
 [![WhatsApp][WhatsApp-shield]][WhatsApp-url]
 [![Railway][Railway-shield]][Railway-url]
- 
+
 ## How It Works
- 
-Jekyll uses a four-stage pipeline that runs on each incoming WhatsApp message.
- 
-1. Parse
-   1. The raw message is sent to Gemini 2.5 Flash with a structured system prompt and the user's current pending state as context.
-   2. Gemini returns a typed JSON action (`create`, `update`, `delete`, `list`, `confirm`, `cancel`) along with any extracted fields — title, date, time, duration, calendar, and reminder.
-   3. The response is validated through a Pydantic model before any next steps run.
-2. Dispatch
-   1. The validated action hits a dispatch layer that routes based on action type and whether a pending state exists.
-   2. Pending state is stored per user in Postgres and expires after 10 minutes.
-   3. Corrections mid-flow merge into the existing pending event rather than starting over, so the user never loses context.
-3. Execute
-   1. Confirmed actions call the Google Calendar API directly.
-   2. Calendar names are resolved via fuzzy string matching — "work cal" finds "Work Calendar" without an exact match.
-   3. Read-only calendars are filtered at the API level before they're ever presented as options, preventing write failures downstream.
-4. Remind
-   1. A persistent worker process polls every 60 seconds independently of the web service.
-   2. Reminder times are read live from Google Calendar on each poll rather than stored, so edits always reflect correctly.
-   3. Reminders are deduplicated by event ID and reminder offset — editing a reminder after one already fired still triggers the new one.
-### Architecture
- 
-```
-WhatsApp Cloud API → Flask webhook → Gemini 2.5 Flash → Pydantic model
-→ Dispatch layer → Google Calendar API → Postgres (state + dedup)
-                                       ↑
-                     Reminder worker (persistent, 60s poll)
-```
- 
-For the full product spec see the [Jekyll PRD](https://www.notion.so/Jekyll-PRD-WIP-3632b89f0b3980f5b8dcebb322d80e1b?source=copy_link).
- 
+
+Jekyll runs a four-stage pipeline on every incoming WhatsApp message.
+
+**1. Parse**
+
+a) The raw message is sent to Gemini 2.5 Flash with a structured system prompt and the user's current pending state as context.
+
+b) Gemini returns a typed JSON action (`create`, `update`, `delete`, `list`, `confirm`, `cancel`) along with any extracted fields: title, date, time, duration, calendar, and reminder.
+
+c) The response is validated through a Pydantic model before any next step runs.
+
+**2. Dispatch**
+
+a) The validated action hits a dispatch layer that routes based on action type and whether a pending state exists.
+
+b) Pending state is stored per user in Postgres and expires after 10 minutes.
+
+c) Corrections mid-flow merge into the existing pending event rather than starting over, so the user never loses context.
+
+**3. Execute**
+
+a) Confirmed actions call the Google Calendar API directly.
+
+b) Calendar names resolve through fuzzy string matching, so "work cal" finds "Work Calendar" without an exact match.
+
+c) Read-only calendars are filtered at the API level before they are ever presented as options, which prevents write failures downstream.
+
+**4. Remind**
+
+a) A persistent worker process polls every 60 seconds, independently of the web service.
+
+b) Reminder times are read live from Google Calendar on each poll rather than stored, so edits always reflect correctly.
+
+c) Reminders are deduplicated by event ID and reminder offset, so editing a reminder after one has already fired still triggers the new one.
+
+## Architecture
+
+<img width="3520" height="2368" alt="image" src="https://github.com/user-attachments/assets/c9aab963-d283-47b2-afd6-ce8842cf9e7b" />
+
+Jekyll runs as two long-running processes on Railway: a Flask web service and a reminder worker.
+
+The web service owns every inbound message. Meta's WhatsApp Cloud API delivers each text as a POST to `/webhook`, where Flask verifies the request signature against `WHATSAPP_APP_SECRET` before anything else runs. First-time users get an OAuth link to connect Google Calendar. Returning users go straight into the four-stage pipeline above.
+
+The reminder worker runs on its own. It polls Google Calendar and sends reminders as they come due.
+
+The two processes never call each other. They coordinate only through Postgres, which keeps the request path fast and lets either one restart on its own.
+
+## Why This Stack?
+
+**Flask:** The webhook is a thin HTTP layer. It receives a POST, verifies a signature, and hands off. That does not need a heavy framework, so Flask keeps the surface small.
+
+**Gemini 2.5 Flash:** Parsing a calendar request is extraction and classification, not open-ended generation. The user is waiting in a live chat, so latency matters. Flash is fast and cheap, and the structured system prompt does the heavy lifting.
+
+**Pydantic:** Model output is untrusted. Validating it into a typed schema before anything touches a calendar means malformed output fails loud and early, instead of corrupting a calendar write.
+
+**Postgres:** Pending state has to survive deploys and be shared between two processes. An in-memory store would lose state on every restart and could not be shared. Postgres also gives the reminder dedup table real durability.
+
+**A separate reminder worker:** Reminders are time-driven, not request-driven. Polling cannot live in the request path, or a slow poll would block a webhook response. Running it as its own persistent process keeps the two concerns isolated and independently restartable.
+
+**Railway:** It runs a web service and a persistent worker side by side, with managed Postgres and shared variables across both. No cron, no extra infra. For a two-process app, that is the lowest-overhead option.
+
+One more decision sits above the stack: WhatsApp itself. Jekyll lives in WhatsApp because that is where users already are. No download, no new habit. The interface is the chat they already keep open.
+
+## Project Structure
+
+The codebase maps onto the pipeline stages.
+
+`whatsapp.py` is the Flask web service. It owns webhook verification, signature checks, the Google OAuth flow, and outbound WhatsApp messages.
+
+`parse.py` is the language layer. It holds the system prompt, the Gemini call, and the Pydantic models that define every valid action. Nothing leaves this file until it has passed validation.
+
+The dispatch layer routes validated actions by type and pending state. The calendar layer wraps the Google Calendar API.
+
+`reminders.py` is the worker. It runs as its own process, polling Google Calendar on a fixed interval.
+
 ## Getting Started
- 
+
 ### Prerequisites
- 
+
 - Python 3.11+
 - Meta WhatsApp Business account and phone number
 - Google Cloud project with the Calendar API enabled
 - Gemini API key
 - Railway account (or any platform with Postgres and persistent workers)
+
 ### Installation
- 
+
 1. Clone the repo
    ```sh
    git clone https://github.com/aalurkar/jekyll.git
    cd jekyll
    ```
- 
+
 2. Install dependencies
    ```sh
    pip install -r requirements.txt
    ```
- 
+
 3. Create a `.env` file
    ```
    FLASK_SECRET_KEY=
@@ -83,103 +127,50 @@ For the full product spec see the [Jekyll PRD](https://www.notion.so/Jekyll-PRD-
    DATABASE_URL=sqlite:///users.db
    BASE_URL=http://localhost:8001
    ```
- 
+
 4. Run locally
    ```sh
    FLASK_APP=whatsapp flask run --port 8001
    ```
- 
+
 5. Expose your local server for WhatsApp webhook verification
    ```sh
    ngrok http 8001
    ```
- 
+
 6. Set your webhook URL in the Meta Developer Console to `https://<your-ngrok-url>/webhook`
-## Usage
- 
-Once connected via OAuth, text Jekyll on WhatsApp.
- 
-**Scheduling**
-```
-Dentist Friday at 3pm
-Add a team lunch tomorrow at noon on my work calendar
-Coffee with Maya Saturday morning, 45 min
-```
- 
-**Editing**
-```
-Move my dentist to Monday at 2pm
-Change the lunch to 1 hour
-Edit team lunch to my personal calendar
-```
- 
-**Deleting**
-```
-Cancel the dentist appointment
-Remove team lunch
-```
- 
-**Viewing**
-```
-What do I have today?
-What's tomorrow look like?
-Tell me about the team lunch
-What calendars do I have?
-```
- 
-**Reminders**
-```
-Remind me 1 hour before the dentist
-Add a 15 minute reminder to team lunch
-```
- 
-**Other**
-```
-Refresh
-```
- 
-Jekyll confirms every action before committing. Reply Yes, No, or send a correction inline.
- 
-For the full user guide see the [Jekyll User Guide](https://www.notion.so/User-guide-for-Jekyll-35d2b89f0b3980faa54eccbd930609c0?source=copy_link).
- 
+
 ## Deployment
- 
+
 Jekyll runs two services on Railway.
- 
+
 ### Web Service
- 
+
 Handles all incoming WhatsApp messages.
- 
+
 - Start command: `gunicorn whatsapp:app`
+
 ### Reminders Worker
- 
-Sends WhatsApp reminders before events. Runs as a persistent worker — no cron schedule needed.
- 
+
+Sends reminders before events. Runs as a persistent worker, so no cron schedule is needed.
+
 - Start command: `python reminders.py`
-- Polls every 60 seconds
-- Reads reminder times live from Google Calendar so edits always reflect correctly
+
 Both services share the same Postgres database. Use Railway's shared variables so both stay in sync.
- 
+
 ## Roadmap
- 
-- [x] Create, edit, and delete events via WhatsApp
-- [x] Multi-calendar support with fuzzy matching
-- [x] Conflict detection
-- [x] Configurable WhatsApp reminders
-- [x] Persistent reminder worker
-- [ ] Multi-user onboarding flow
-- [ ] Recurring event support
-- [ ] Time zone configuration per user
-For the full product spec see the [Jekyll PRD](https://www.notion.so/Jekyll-PRD-WIP-3632b89f0b3980f5b8dcebb322d80e1b?source=copy_link).
- 
+
+[Here's](https://www.notion.so/Overview-3632b89f0b398058bd0be0cbc135aa44?source=copy_link#3632b89f0b39808fba5dd2b5f35fd210) what we have planned for the future of Jekyll. 
+
 ## Contact
- 
-Akshat Alurkar — aalurkar05@gmail.com — [LinkedIn](https://linkedin.com/in/akshat-alurkar)
- 
+
+Akshat Alurkar - aalurkar05@gmail.com - [LinkedIn](https://linkedin.com/in/akshat-alurkar)
+Aanya Soni - aanya.soni@gmail.com - [LinkedIn](https://linkedin.com/in/aanyasonii)
+
 Project Link: [https://github.com/aalurkar/jekyll](https://github.com/aalurkar/jekyll)
- 
+
 ---
- 
+
 [Python-shield]: https://img.shields.io/badge/Python-1a1a1a?style=for-the-badge&logo=python&logoColor=white
 [Python-url]: https://python.org
 [Flask-shield]: https://img.shields.io/badge/Flask-1a1a1a?style=for-the-badge&logo=flask&logoColor=white
