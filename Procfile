@@ -1,1 +1,1 @@
-web: gunicorn whatsapp:app --bind 0.0.0.0:$PORT 
+web: gunicorn src.whatsapp:app --bind 0.0.0.0:$PORT 

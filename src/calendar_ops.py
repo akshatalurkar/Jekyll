@@ -6,7 +6,7 @@ from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
 from googleapiclient.discovery import build
 
-from core import encrypt_token, decrypt_token, db
+from .core import encrypt_token, decrypt_token, db
 
 import os
 

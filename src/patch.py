@@ -2,10 +2,10 @@ import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
-import formatted
-import state
-import calendar_ops
-from models import CalendarAction, EventFields
+from . import formatted
+from . import state
+from . import calendar_ops
+from .models import CalendarAction
 
 TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_DURATION_MINUTES = 60

@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 from google import genai
 from google.genai import types
 
-from models import CalendarAction
+from .models import CalendarAction
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 

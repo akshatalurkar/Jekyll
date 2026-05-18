@@ -1,5 +1,5 @@
 from datetime import datetime, timedelta, timezone
-from core import db
+from .core import db
 
 PENDING_TTL_MINUTES = 10
 

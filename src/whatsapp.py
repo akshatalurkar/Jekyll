@@ -1,6 +1,6 @@
 import traceback
 from datetime import datetime, timedelta, timezone
-from models import CalendarAction
+from .models import CalendarAction
 from flask import request, session, render_template
 from requests_oauthlib import OAuth2Session
 import base64
@@ -10,15 +10,13 @@ import os
 
 TEST_MODE = os.getenv("JEKYLL_TEST_MODE") == "1"
 
-from core import (
+from .core import (
     app, db, User, ProcessedMessage, SentReminder,
     send_whatsapp, verify_whatsapp_signature,
     encrypt_token, normalize_phone,
     BASE_URL, NOTION_URL,
 )
-import state
-import parse
-import patch
+from . import state, parse, patch
 
 
 @app.route("/auth/<phone>")

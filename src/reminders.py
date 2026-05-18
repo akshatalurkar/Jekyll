@@ -1,11 +1,10 @@
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 
-from core import app, db, User, SentReminder, send_whatsapp
-import calendar_ops
+from .core import app, db, User, SentReminder, send_whatsapp
+from . import calendar_ops
 
-WINDOW_MINUTES = 5
+WINDOW_MINUTES = 1
 DEFAULT_REMINDER_MINUTES = 30
 
 
