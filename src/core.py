@@ -1,5 +1,6 @@
 import hashlib
 import hmac
+import json
 import os
 import requests
 from datetime import datetime, timezone
@@ -32,7 +33,12 @@ if missing:
 app = Flask(__name__)
 app.wsgi_app = ProxyFix(app.wsgi_app, x_proto=1, x_host=1)
 app.secret_key = os.environ["FLASK_SECRET_KEY"]
+app.config["MAX_CONTENT_LENGTH"] = 64 * 1024
 app.config["SQLALCHEMY_DATABASE_URI"] = database_url
+kwargs = {"pool_pre_ping": True}
+if database_url.startswith("sqlite"):
+    kwargs["connect_args"] = {"check_same_thread": False}
+app.config["SQLALCHEMY_ENGINE_OPTIONS"] = kwargs
 db = SQLAlchemy(app)
 
 class User(db.Model):
@@ -98,7 +104,9 @@ def send_whatsapp(to: str, text: str) -> dict:
     )
     data = response.json()
     if not response.ok:
-        print(f"[send_whatsapp] failed to={to} status={response.status_code} body={data}")
+        err = data.get("error") if isinstance(data, dict) else None
+        code = err.get("code") if isinstance(err, dict) else None
+        print(f"[send_whatsapp] failed to=***{to[-4:]} status={response.status_code} code={code} error={err}")
     return data
 
 def verify_whatsapp_signature(req) -> bool:
@@ -115,3 +123,9 @@ def verify_whatsapp_signature(req) -> bool:
 
 class AuthExpiredError(Exception):
     pass
+
+
+def log_event(event: str, **fields) -> None:
+    entry = {"ts": datetime.now(timezone.utc).isoformat(), "event": event}
+    entry.update(fields)
+    print(json.dumps(entry))

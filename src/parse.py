@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
@@ -7,6 +8,7 @@ from google import genai
 from google.genai import types
 
 from .models import CalendarAction
+from .core import log_event
 
 client = genai.Client(api_key=os.environ["GEMINI_API_KEY"])
 
@@ -75,7 +77,7 @@ FIELD RULES:
 - calendar: ONLY if the user explicitly names one. Extract just the calendar name, dropping "my", "the", "calendar", and any verbs. Examples:
     - "on my work calendar" → "work"
     - "add it to Testing Jekyll" → "Testing Jekyll"
-    - "set the calendar to aalurkar05@gmail.com" → "aalurkar05@gmail.com"
+    - "set the calendar to user@example.com" → "user@example.com"
     - "change calendar to default" → "default"
     - "put it on my main calendar" → "main"
   Never infer a calendar from context.
@@ -133,11 +135,24 @@ def parse(message, pending=None):
                 thinking_config=types.ThinkingConfig(thinking_budget=0),
             ),
         )
-        raw = response.text.strip().replace("```json", "").replace("```", "")
-        return CalendarAction(**json.loads(raw))
+        raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", response.text.strip())
+        result = CalendarAction(**json.loads(raw))
+        log_event("parse_ok", action=result.action)
+        return result
     except Exception as e:
-        print(f"[parse error] {type(e).__name__}: {e}")
-        return CalendarAction(
-            action="clarify",
-            clarification="Didn't catch that. Rephrase?",
+        err_type = type(e).__name__
+        err_str = str(e).lower()
+        is_quota = (
+            "quota" in err_str
+            or "429" in err_str
+            or "rate" in err_str
+            or "resourceexhausted" in err_type.lower()
+            or "toomanyrequests" in err_type.lower()
         )
+        log_event("parse_error", error_type=err_type, is_quota=is_quota)
+        clarification = (
+            "The system is momentarily busy — try again in a few seconds."
+            if is_quota
+            else "Didn't catch that. Rephrase?"
+        )
+        return CalendarAction(action="clarify", clarification=clarification)

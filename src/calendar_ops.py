@@ -4,7 +4,9 @@ from zoneinfo import ZoneInfo
 
 from google.oauth2.credentials import Credentials
 from google.auth.transport.requests import Request
+from google.auth.exceptions import RefreshError
 from googleapiclient.discovery import build
+from googleapiclient.errors import HttpError
 
 from .core import encrypt_token, decrypt_token, db, AuthExpiredError
 
@@ -14,6 +16,9 @@ TZ = ZoneInfo("America/Los_Angeles")
 DEFAULT_DURATION_MINUTES = 60
 DEFAULT_REMINDER_MINUTES = 30
 CALENDAR_LIST_TTL_HOURS = 24
+# Refresh access token a little before Google's 60-min expiry to avoid
+# racing the boundary on long-running requests.
+TOKEN_REFRESH_SKEW_SECONDS = 120
 
 PRIMARY_ALIASES = {
     "default", "primary", "main", "my calendar",
@@ -29,14 +34,32 @@ def get_service(user):
         client_id=os.getenv("GOOGLE_CLIENT_ID"),
         client_secret=os.getenv("GOOGLE_CLIENT_SECRET"),
     )
-    if creds.expired and creds.refresh_token:
+    # Only refresh when the current access token is missing, expired, or about
+    # to expire — refreshing on every call adds ~200–500ms latency and burns
+    # through Google's refresh-rate budget. `creds.expired` returns True when
+    # `expiry` is set and in the past; if `expiry` is unknown (None) we treat
+    # the token as needing a refresh so the very first call still works.
+    needs_refresh = (
+        not creds.token
+        or creds.expiry is None
+        or creds.expired
+        or (creds.expiry - datetime.utcnow()).total_seconds() < TOKEN_REFRESH_SKEW_SECONDS
+    )
+    if needs_refresh and creds.refresh_token:
         try:
             creds.refresh(Request())
             user.oauth_token = encrypt_token(creds.token)
             db.session.commit()
-        except Exception:
+        except RefreshError:
             raise AuthExpiredError()
-    return build("calendar", "v3", credentials=creds)
+    try:
+        return build("calendar", "v3", credentials=creds)
+    except RefreshError:
+        raise AuthExpiredError()
+    except HttpError as e:
+        if getattr(e, "status_code", None) == 401 or getattr(getattr(e, "resp", None), "status", None) == 401:
+            raise AuthExpiredError()
+        raise
 
 
 def get_user_calendars(user, service):
@@ -143,16 +166,23 @@ def find_conflicts(user, service, date, time, duration_minutes, exclude_event_id
 
 
 def find_matching_events(user, service, keyword, max_results=50):
-    if not keyword:
+    if not keyword or not keyword.strip():
         return []
 
     today_start = datetime.now(TZ).replace(hour=0, minute=0, second=0, microsecond=0)
-    today_start_utc = today_start.astimezone(timezone.utc).isoformat()
+    window_start_utc = (today_start - timedelta(days=2)).astimezone(timezone.utc).isoformat()
+    window_end_utc = (today_start + timedelta(days=60)).astimezone(timezone.utc).isoformat()
 
     keywords = [keyword.lower()]
     words = keyword.lower().split()
     if len(words) > 1:
         keywords += [" ".join(words[:i]) for i in range(len(words) - 1, 0, -1)]
+
+    # Server-side pre-filter — pick the longest word as it's most likely to be
+    # the distinctive token (e.g. "lunch with maya" → "maya" is more selective
+    # than "lunch"). Guarded against empty `words` from whitespace-only input
+    # (already filtered above, but defensive in case of unicode oddities).
+    q_term = max(words, key=len) if words else keyword.lower()
 
     matches = []
     seen_ids = set()
@@ -161,7 +191,9 @@ def find_matching_events(user, service, keyword, max_results=50):
         try:
             events = service.events().list(
                 calendarId=cal["id"],
-                timeMin=today_start_utc,
+                timeMin=window_start_utc,
+                timeMax=window_end_utc,
+                q=q_term,
                 maxResults=max_results,
                 singleEvents=True,
                 orderBy="startTime",
@@ -208,10 +240,13 @@ def list_events_for_day(user, service, day_iso):
 
 
 def _reminders_body(reminder_minutes):
+    mins = reminder_minutes or DEFAULT_REMINDER_MINUTES
+    if mins > 40320:
+        mins = 40320
     return {
         "useDefault": False,
         "overrides": [
-            {"method": "popup", "minutes": reminder_minutes or DEFAULT_REMINDER_MINUTES}
+            {"method": "popup", "minutes": mins}
         ],
     }
 
@@ -224,8 +259,9 @@ def insert_event(service, calendar_id, title, date, time,
         "summary": title,
         "start": {"dateTime": start.isoformat(), "timeZone": "America/Los_Angeles"},
         "end": {"dateTime": end.isoformat(), "timeZone": "America/Los_Angeles"},
-        "reminders": _reminders_body(reminder_minutes),
     }
+    if reminder_minutes is not None:
+        body["reminders"] = _reminders_body(reminder_minutes)
     if location:
         body["location"] = location
     return service.events().insert(calendarId=calendar_id, body=body).execute()

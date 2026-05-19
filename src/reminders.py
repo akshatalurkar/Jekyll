@@ -1,7 +1,7 @@
 import time
 from datetime import datetime, timedelta, timezone
 
-from .core import app, db, User, SentReminder, send_whatsapp
+from .core import app, db, User, SentReminder, send_whatsapp, log_event
 from . import calendar_ops
 
 LOOK_BACK_MINUTES = 2
@@ -104,6 +104,7 @@ def process_user(user):
 
         db.session.add(SentReminder(user_id=user.id, event_id=marker))
         db.session.commit()
+        log_event("reminder_sent", user_id=user.id)
         sent += 1
 
     return sent

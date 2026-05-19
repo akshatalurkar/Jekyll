@@ -12,9 +12,9 @@ import os
 TEST_MODE = os.getenv("JEKYLL_TEST_MODE") == "1"
 
 from .core import (
-    app, db, User, ProcessedMessage, SentReminder,
+    app, db, User, ProcessedMessage,
     send_whatsapp, verify_whatsapp_signature,
-    encrypt_token, normalize_phone,
+    encrypt_token, normalize_phone, log_event,
     BASE_URL, NOTION_URL, AuthExpiredError,
 )
 from . import state, parse, patch
@@ -70,11 +70,13 @@ def oauth_callback():
             user = User(phone=phone)
             db.session.add(user)
         user.oauth_token = encrypt_token(token["access_token"])
-        user.refresh_token = encrypt_token(token.get("refresh_token"))
+        if token.get("refresh_token"):
+            user.refresh_token = encrypt_token(token["refresh_token"])
         db.session.commit()
+        log_event("auth_completed", user_id=user.id)
         return render_template("success.html")
     except Exception as e:
-        print(f"[oauth_callback] error for phone={phone}: {type(e).__name__}: {e}")
+        print(f"[oauth_callback] error for phone=***{phone[-4:] if phone else 'none'}: {type(e).__name__}: {e}")
         return "Authorization failed. Please try again.", 400
 
 
@@ -103,18 +105,21 @@ def webhook():
 
     if ProcessedMessage.query.filter_by(message_id=message_id).first():
         return "OK", 200
-    db.session.add(ProcessedMessage(message_id=message_id))
     if random.random() < 0.01:
         cutoff = datetime.now(timezone.utc) - timedelta(days=7)
         ProcessedMessage.query.filter(ProcessedMessage.created_at < cutoff).delete()
-    db.session.commit()
+        db.session.commit()
 
     if text is None:
+        db.session.add(ProcessedMessage(message_id=message_id))
+        db.session.commit()
         send_whatsapp(phone, "File not supported. Please send text only.")
         return "OK", 200
 
     user = User.query.filter_by(phone=phone).first()
     if not user or not user.oauth_token:
+        db.session.add(ProcessedMessage(message_id=message_id))
+        db.session.commit()
         send_whatsapp(
             phone,
             f"Welcome to Jekyll!\n\n"
@@ -140,7 +145,7 @@ def webhook():
             if lowered in NO:
                 state.clear_pending(db, user)
                 reply = "Cancelled."
-            elif lowered == "all" or (lowered.isdigit() and 1 <= int(lowered) <= len(matches)):
+            elif lowered == "all" or (lowered.isdigit() and lowered.isascii() and 1 <= int(lowered) <= len(matches)):
                 reply = patch.resolve_disambiguate(db, user, pending, lowered)
             else:
                 state.clear_pending(db, user)
@@ -155,11 +160,17 @@ def webhook():
                 action = parse.parse(text, pending)
             reply = patch.dispatch(db, user, action, message=text)
 
+        db.session.add(ProcessedMessage(message_id=message_id))
+        db.session.commit()
         if TEST_MODE:
             return reply, 200
         send_whatsapp(user.phone, reply)
         return "", 200
     except AuthExpiredError:
+        try:
+            state.clear_pending(db, user)
+        except Exception:
+            pass
         try:
             msg = f"Your Google Calendar connection expired. Reconnect here: {BASE_URL}/auth/{phone}"
             if TEST_MODE:
